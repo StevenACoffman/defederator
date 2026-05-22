@@ -1,0 +1,69 @@
+{{- if .GenerateClient }}
+	{{ reserveImport "context" }}
+	{{ reserveImport "net/http" }}
+
+	{{ reserveImport "github.com/StevenACoffman/defederator/federationclient" }}
+
+	{{- if .ClientInterfaceName }}
+        type {{ .ClientInterfaceName }} interface {
+            {{- range $model := .Operation }}
+                {{ $model.Name | go }} (ctx context.Context{{- range $arg := .Args }}, {{ $arg.Variable | goPrivate }} {{ $arg.Type | ref }} {{- end }}) (*{{ $model.ResponseStructName | go }}, error)
+            {{- end }}
+        }
+    {{- end }}
+
+	type Client struct {
+	    Client *federationclient.Client
+	}
+
+    func NewClient(sg *federationclient.Supergraph, httpClient *http.Client) {{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }} {
+        return &Client{Client: federationclient.NewClient(sg, httpClient)}
+    }
+
+{{- end }}
+
+{{- range $name, $element := .Fragment }}
+	type  {{ .Name | go  }} {{ .Type | ref }}
+
+    {{ genGetters (.Name|go) .Type }}
+    {{ genConversionGetters (.Name|go) .SpreadFragments }}
+{{- end }}
+
+{{- range $name, $element := .StructSources }}
+	type {{ .Name }} {{ .Type | ref }}
+
+    {{ genGetters .Name .Type }}
+{{- end}}
+
+{{- range $name, $element := .OperationResponse }}
+	type  {{ .Name | go  }} {{ .Type | ref }}
+
+    {{ genGetters (.Name|go) .Type }}
+{{- end }}
+
+{{- range $model := .Operation}}
+	const {{ $model.Name|go }}Document = `{{ $model.Operation }}`
+
+	{{- if $.GenerateClient }}
+		func (c *Client) {{ $model.Name|go }} (ctx context.Context{{- range $arg := .Args }}, {{ $arg.Variable | goPrivate }} {{ $arg.Type | ref }} {{- end }}) (*{{ $model.ResponseStructName | go }}, error) {
+			vars := map[string]any{
+			{{- range $args := .VariableDefinitions}}
+				"{{ $args.Variable }}": {{ $args.Variable | goPrivate }},
+			{{- end }}
+			}
+
+			var res {{ $model.ResponseStructName | go }}
+			if err := c.Client.Execute(ctx, {{ $model.Name|go }}Document, "{{ $model.Name }}", vars, &res); err != nil {
+				return nil, err
+			}
+
+			return &res, nil
+		}
+	{{- end}}
+{{- end}}
+
+var DocumentOperationNames = map[string]string{
+   {{- range $model := .Operation}}
+    {{ $model.Name|go }}Document: "{{ $model.Name }}",
+   {{- end}}
+}
