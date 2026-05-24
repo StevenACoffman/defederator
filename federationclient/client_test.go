@@ -15,17 +15,16 @@ import (
 	"testing"
 
 	"github.com/StevenACoffman/defederator/federationclient"
+	"github.com/StevenACoffman/gorouter/federation"
 )
 
 // goldenBase is the path to the gorouter golden fixtures, relative to this file's directory.
 const goldenBase = "../../gorouter/federation/testdata/golden"
 
-// TestClientGolden mirrors the gorouter golden_test.go but calls
-// federationclient.Client.Execute instead of federation.Execute directly.
+// TestClientGolden drives execution through federationclient using the golden fixtures.
 // It verifies:
-//  1. Client.Execute correctly wraps federation.Execute.
-//  2. The JSON round-trip (map[string]any → json.Marshal → json.Unmarshal) preserves data.
-//  3. Plan caching: calling Execute twice on the same client returns the same result.
+//  1. The JSON round-trip (map[string]any → json.Marshal → json.Unmarshal) preserves data.
+//  2. Plan specs are serialized and resolved correctly (BuildPlanSpec → JSON → Resolve).
 func TestClientGolden(t *testing.T) {
 	sdlTemplate := clientMustReadFile(t, filepath.Join(goldenBase, "supergraph.graphql"))
 
@@ -53,17 +52,6 @@ func TestClientGolden(t *testing.T) {
 	}
 }
 
-// resetableServer wraps an httptest.Server whose response-sequence counter can
-// be reset between Execute calls so the plan gets the correct subgraph responses
-// on both the first and the second (plan-cache hit) call.
-type resetableServer struct {
-	srv     *httptest.Server
-	counter *atomic.Int64
-}
-
-// reset sets the response counter back to zero.
-func (rs *resetableServer) reset() { rs.counter.Store(0) }
-
 func runClientGoldenFixture(t *testing.T, sdlTemplate, dir string) {
 	t.Helper()
 
@@ -78,16 +66,13 @@ func runClientGoldenFixture(t *testing.T, sdlTemplate, dir string) {
 	}
 
 	// Build one mock httptest.Server per subgraph.
-	// Responses are served in order: SUBGRAPH.json on call 1, SUBGRAPH_2.json on
-	// call 2, etc. (for @requires multi-step plans).
 	respDir := filepath.Join(dir, "subgraph_responses")
 	entries, err := os.ReadDir(respDir)
 	if err != nil {
 		t.Fatalf("read subgraph_responses: %v", err)
 	}
 
-	// Collect response files grouped by subgraph enum name.
-	seqFiles := make(map[string][]string) // enum → ordered response file paths
+	seqFiles := make(map[string][]string)
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -105,15 +90,13 @@ func runClientGoldenFixture(t *testing.T, sdlTemplate, dir string) {
 		}
 		seqFiles[enum] = append(seqFiles[enum], filepath.Join(respDir, e.Name()))
 	}
-	// Sort each subgraph's files: SUBGRAPH.json first, then SUBGRAPH_2.json, etc.
 	for enum := range seqFiles {
 		sort.Slice(seqFiles[enum], func(i, j int) bool {
 			return seqFiles[enum][i] < seqFiles[enum][j]
 		})
 	}
 
-	// Build mock servers with resettable counters.
-	rsMap := map[string]*resetableServer{}
+	servers := make(map[string]*httptest.Server)
 	for enum, files := range seqFiles {
 		bodies := make([][]byte, 0, len(files))
 		for _, f := range files {
@@ -137,58 +120,69 @@ func runClientGoldenFixture(t *testing.T, sdlTemplate, dir string) {
 			_, _ = w.Write(capturedBodies[idx])
 		}))
 		t.Cleanup(srv.Close)
-		rsMap[enum] = &resetableServer{srv: srv, counter: &ctr}
+		servers[enum] = srv
 	}
 
-	// Patch SDL placeholder URLs with actual server addresses.
+	// Patch mock server URLs into the SDL, then extract the URL map.
 	sdl := sdlTemplate
-	for enum, rs := range rsMap {
-		sdl = strings.ReplaceAll(sdl, enum+"_URL", rs.srv.URL)
+	for enum, srv := range servers {
+		sdl = strings.ReplaceAll(sdl, enum+"_URL", srv.URL)
 	}
-
-	sg, err := federationclient.ParseSupergraphSDL(sdl)
+	urls, err := federation.SubgraphURLs(sdl)
 	if err != nil {
-		t.Fatalf("ParseSupergraphSDL: %v", err)
+		t.Fatalf("SubgraphURLs: %v", err)
 	}
 
-	client := federationclient.NewClient(sg, nil)
+	// Build the plan spec against the full supergraph (needed for planning metadata).
+	sg, err := federation.ParseSchema(sdl)
+	if err != nil {
+		t.Fatalf("ParseSchema: %v", err)
+	}
+	spec, err := federation.BuildPlanSpec(sg, query, "")
+	if err != nil {
+		t.Fatalf("BuildPlanSpec: %v", err)
+	}
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		t.Fatalf("marshal PlanSpec: %v", err)
+	}
+
+	client, err := federationclient.NewClient(urls, nil, map[string]string{
+		"": string(specJSON),
+	})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 
 	goldenPath := filepath.Join(dir, "expected.json")
 	expected := clientMustReadBytes(t, goldenPath)
 
-	// --- First Execute call ---
-	var result1 map[string]any
-	if err := client.Execute(context.Background(), query, "", variables, &result1); err != nil {
-		t.Fatalf("Execute (call 1): %v", err)
+	var result map[string]any
+	if err := client.Execute(context.Background(), "", variables, &result); err != nil {
+		t.Fatalf("Execute: %v", err)
 	}
 
-	actual1 := map[string]any{"data": result1}
-	actual1Bytes := clientMustMarshalIndent(t, actual1)
-
-	if !clientJSONEqual(expected, actual1Bytes) {
-		t.Errorf("call 1 response mismatch\nwant: %s\n got: %s",
-			clientNormalize(expected), clientNormalize(actual1Bytes))
+	actualBytes := clientMustMarshalIndent(t, map[string]any{"data": result})
+	if !clientJSONEqual(expected, actualBytes) {
+		t.Errorf("response mismatch\nwant: %s\n got: %s",
+			clientNormalize(expected), clientNormalize(actualBytes))
 	}
+}
 
-	// --- Second Execute call: verifies plan caching ---
-	// Reset all mock server counters to 0 so the same response sequence is
-	// replayed. The client is reused (same instance), so the plan is looked up
-	// from the cache rather than rebuilt via federation.BuildPlan.
-	for _, rs := range rsMap {
-		rs.reset()
+// TestNewClient_UnknownSubgraph verifies that NewClient returns an error when a spec
+// references a subgraph enum not present in the URL map.
+func TestNewClient_UnknownSubgraph(t *testing.T) {
+	badSpec := `{"fetches":[{"subgraphEnum":"NONEXISTENT","query":"{ product { id } }"}]}`
+	_, clientErr := federationclient.NewClient(
+		map[string]string{"OTHER": "https://other.example.com"},
+		nil,
+		map[string]string{"GetProduct": badSpec},
+	)
+	if clientErr == nil {
+		t.Error("NewClient with unknown subgraph enum should return an error")
 	}
-
-	var result2 map[string]any
-	if err := client.Execute(context.Background(), query, "", variables, &result2); err != nil {
-		t.Fatalf("Execute (call 2 / cache hit): %v", err)
-	}
-
-	actual2 := map[string]any{"data": result2}
-	actual2Bytes := clientMustMarshalIndent(t, actual2)
-
-	if !clientJSONEqual(expected, actual2Bytes) {
-		t.Errorf("call 2 (cache hit) response mismatch\nwant: %s\n got: %s",
-			clientNormalize(expected), clientNormalize(actual2Bytes))
+	if !strings.Contains(clientErr.Error(), "NONEXISTENT") {
+		t.Errorf("error should name the unknown enum, got: %v", clientErr)
 	}
 }
 

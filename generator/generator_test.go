@@ -54,18 +54,25 @@ query GetProduct($id: ID!) {
 	}
 	out := string(data)
 
-	if strings.Contains(out, "clientv2") {
-		t.Errorf("generated file references clientv2, should use federationclient")
+	for _, notWant := range []string{"clientv2", "federationclient"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("generated file contains forbidden string %q", notWant)
+		}
 	}
 	for _, want := range []string{
-		"federationclient",
 		"GetProductDocument",
 		"func (c *Client) GetProduct",
-		"c.Client.Execute",
+		"ResolveURLSpec",
+		"ExecuteAndUnmarshal",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("generated file missing %q", want)
 		}
+	}
+
+	execFile := filepath.Join(tmpDir, "federation_exec.go")
+	if _, err := os.Stat(execFile); os.IsNotExist(err) {
+		t.Errorf("federation_exec.go not written to output dir")
 	}
 
 	t.Logf("generated output:\n%s", out)

@@ -20,9 +20,23 @@ func (p PackageConfig) IsDefined() bool {
 	return p.Filename != "" && p.Package != ""
 }
 
+// TypeBinding maps a GraphQL scalar name to a Go type with optional custom
+// marshal/unmarshal functions, matching genqlient's bindings: format.
+type TypeBinding struct {
+	Type        string `yaml:"type"`
+	Marshaler   string `yaml:"marshaler,omitempty"`
+	Unmarshaler string `yaml:"unmarshaler,omitempty"`
+}
+
 // GenerateConfig controls optional code-generation behaviours.
 type GenerateConfig struct {
 	ClientInterfaceName *string `yaml:"clientInterfaceName,omitempty"`
+	// ExportOperations is a path to write a JSON manifest of all generated operations.
+	// Empty means no manifest is written.
+	ExportOperations string `yaml:"export_operations,omitempty"`
+	// Optional controls how nullable GraphQL fields are represented in Go.
+	// "pointer" (default): nullable T → *T; "value": nullable T → T (zero = absent).
+	Optional string `yaml:"optional,omitempty"`
 }
 
 // Config is the top-level .defederator.yml structure.
@@ -44,6 +58,10 @@ type Config struct {
 	// Keys are join__Graph enum values (e.g. "PRODUCTS").
 	SubgraphURLs map[string]string `yaml:"subgraph_urls,omitempty"`
 
+	// Bindings maps GraphQL scalar names to Go types. Equivalent to genqlient's
+	// bindings: section.
+	Bindings map[string]TypeBinding `yaml:"bindings,omitempty"`
+
 	// Generate controls optional generation behaviours.
 	Generate *GenerateConfig `yaml:"generate,omitempty"`
 
@@ -51,7 +69,14 @@ type Config struct {
 	Dir string `yaml:"-"`
 }
 
-var defaultFilenames = []string{".defederator.yml", "defederator.yml", "defederator.yaml"}
+var defederatorFilenames = []string{".defederator.yml", "defederator.yml", "defederator.yaml"}
+var genqlientFilenames = []string{"genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml"}
+
+// defaultFilenames is searched in order; defederator files take precedence.
+var defaultFilenames = []string{
+	".defederator.yml", "defederator.yml", "defederator.yaml",
+	"genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml",
+}
 
 // LoadConfig reads and parses a .defederator.yml file.
 // All relative paths inside the config are resolved relative to the file's directory.
@@ -69,12 +94,26 @@ func LoadConfig(path string) (*Config, error) {
 }
 
 // LoadConfigFromDir searches dir and its parents for a config file.
+// Defederator files take precedence over genqlient files. When a genqlient
+// config is found, LoadGenqlientConfig is used so the field mapping is correct.
 func LoadConfigFromDir(dir string) (*Config, error) {
 	path, err := findConfig(dir)
 	if err != nil {
 		return nil, fmt.Errorf("config: no config file found in %s or its parents: %w", dir, err)
 	}
+	if isGenqlientFilename(filepath.Base(path)) {
+		return LoadGenqlientConfig(path)
+	}
 	return LoadConfig(path)
+}
+
+func isGenqlientFilename(name string) bool {
+	for _, n := range genqlientFilenames {
+		if name == n {
+			return true
+		}
+	}
+	return false
 }
 
 func findConfig(dir string) (string, error) {

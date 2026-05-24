@@ -74,7 +74,7 @@ query GetProduct($id: ID!) {
 	err = gqlgencGenerator.Generate(
 		context.Background(),
 		gqlgencCfg,
-		api.ReplacePlugin(gqlgencfed.NewWithFilePaths([]string{queryFile}, clientPkg, generateCfg)),
+		api.ReplacePlugin(gqlgencfed.NewWithFilePaths([]string{queryFile}, clientPkg, generateCfg, string(sdlBytes))),
 	)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -86,17 +86,25 @@ query GetProduct($id: ID!) {
 	}
 	out := string(data)
 
-	if strings.Contains(out, "clientv2") {
-		t.Errorf("output references clientv2, should use federationclient")
+	for _, notWant := range []string{"clientv2", "federationclient"} {
+		if strings.Contains(out, notWant) {
+			t.Errorf("output contains forbidden string %q", notWant)
+		}
 	}
 	for _, want := range []string{
-		"federationclient",
 		"GetProductDocument",
-		"c.Client.Execute",
+		"GetProductPlanSpec",
+		"ResolveURLSpec",
+		"ExecuteAndUnmarshal",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output missing %q", want)
 		}
+	}
+
+	execFile := filepath.Join(tmpDir, "federation_exec.go")
+	if _, err := os.Stat(execFile); os.IsNotExist(err) {
+		t.Errorf("federation_exec.go not written to output dir")
 	}
 	t.Logf("plugin-generated output:\n%s", out)
 }

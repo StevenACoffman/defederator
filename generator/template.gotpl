@@ -1,8 +1,11 @@
 {{- if .GenerateClient }}
 	{{ reserveImport "context" }}
+	{{ reserveImport "fmt" }}
 	{{ reserveImport "net/http" }}
 
-	{{ reserveImport "github.com/StevenACoffman/defederator/federationclient" }}
+	{{- range $model := .Operation}}
+	const {{ $model.Name|go }}PlanSpec = `{{ index $.PlanSpecs $model.Name }}`
+	{{- end}}
 
 	{{- if .ClientInterfaceName }}
         type {{ .ClientInterfaceName }} interface {
@@ -13,11 +16,28 @@
     {{- end }}
 
 	type Client struct {
-	    Client *federationclient.Client
+	    http  *http.Client
+	    plans map[string]*Plan
 	}
 
-    func NewClient(sg *federationclient.Supergraph, httpClient *http.Client) {{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }} {
-        return &Client{Client: federationclient.NewClient(sg, httpClient)}
+    func NewClient(httpClient *http.Client) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+        if httpClient == nil {
+            httpClient = http.DefaultClient
+        }
+        specs := map[string]string{
+            {{- range $model := .Operation}}
+            "{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
+            {{- end}}
+        }
+        plans := make(map[string]*Plan, len(specs))
+        for opName, specJSON := range specs {
+            plan, err := ResolveURLSpec(specJSON)
+            if err != nil {
+                return nil, fmt.Errorf("federation client: resolve plan for %q: %w", opName, err)
+            }
+            plans[opName] = plan
+        }
+        return &Client{http: httpClient, plans: plans}, nil
     }
 
 {{- end }}
@@ -53,7 +73,7 @@
 			}
 
 			var res {{ $model.ResponseStructName | go }}
-			if err := c.Client.Execute(ctx, {{ $model.Name|go }}Document, "{{ $model.Name }}", vars, &res); err != nil {
+			if err := ExecuteAndUnmarshal(ctx, c.plans["{{ $model.Name }}"], vars, c.http, &res); err != nil {
 				return nil, err
 			}
 

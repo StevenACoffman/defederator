@@ -4,7 +4,9 @@ go 1.26.2
 
 require (
 	github.com/99designs/gqlgen v0.17.73
+	github.com/Khan/genqlient v0.8.1
 	github.com/StevenACoffman/gorouter v0.0.0-00010101000000-000000000000
+	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/goccy/go-yaml v1.17.1
 	github.com/gqlgo/gqlgenc v0.0.0-00010101000000-000000000000
 	github.com/vektah/gqlparser/v2 v2.5.33

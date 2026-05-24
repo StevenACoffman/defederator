@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
@@ -30,18 +31,16 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	}
 	sdl := string(sdlBytes)
 
-	// Validate the supergraph SDL is parseable as a federation schema.
-	if _, err := federation.ParseSchema(sdl); err != nil {
+	sg, err := federation.ParseSchema(sdl)
+	if err != nil {
 		return fmt.Errorf("generate: parse supergraph: %w", err)
 	}
 
-	// Strip federation metadata to produce a clean SDL for gqlgenc's type mapper.
 	cleanSDL, err := StripFederationTypes(sdl)
 	if err != nil {
 		return fmt.Errorf("generate: strip federation types: %w", err)
 	}
 
-	// Build the gqlgenc config from our defederator config.
 	gqlgencCfg, err := buildGqlgencConfig(cfg, cleanSDL)
 	if err != nil {
 		return fmt.Errorf("generate: build gqlgenc config: %w", err)
@@ -59,15 +58,41 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: init gqlgen config: %w", err)
 	}
 
-	// Ensure deterministic output.
+	// Schema.Implements iteration order is non-deterministic; sort for stable output.
 	for _, v := range gqlgencCfg.GQLConfig.Schema.Implements {
 		sort.Slice(v, func(i, j int) bool { return v[i].Name < v[j].Name })
 	}
 
-	querySources, err := parsequery.LoadQuerySources(cfg.Query)
+	expandedPaths, err := expandGlobs(cfg.Query, cfg.Dir)
+	if err != nil {
+		return fmt.Errorf("generate: expand query globs: %w", err)
+	}
+
+	var graphqlPaths []string
+	var extraSources []*ast.Source
+	for _, p := range expandedPaths {
+		switch {
+		case hasGraphQLExt(p):
+			graphqlPaths = append(graphqlPaths, p)
+		case hasGoExt(p):
+			embedded, err := extractQueriesFromGoFile(p)
+			if err != nil {
+				return fmt.Errorf("generate: extract queries from %s: %w", p, err)
+			}
+			for _, eq := range embedded {
+				extraSources = append(extraSources, &ast.Source{
+					Name:  eq.source, // "filename:line" so gqlparser errors point back to Go source
+					Input: eq.text,
+				})
+			}
+		}
+	}
+
+	querySources, err := parsequery.LoadQuerySources(graphqlPaths)
 	if err != nil {
 		return fmt.Errorf("generate: load query sources: %w", err)
 	}
+	querySources = append(querySources, extraSources...)
 
 	queryDocument, err := parsequery.ParseQueryDocuments(gqlgencCfg.GQLConfig.Schema, querySources)
 	if err != nil {
@@ -104,6 +129,19 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: generate operations: %w", err)
 	}
 
+	planSpecs := make(map[string]string, len(operations))
+	for _, op := range operations {
+		plan, err := federation.BuildPlan(sg, op.Operation, op.Name)
+		if err != nil {
+			return fmt.Errorf("generate: plan %q: %w", op.Name, err)
+		}
+		specJSON, err := MarshalURLPlanSpec(plan)
+		if err != nil {
+			return fmt.Errorf("generate: marshal plan spec %q: %w", op.Name, err)
+		}
+		planSpecs[op.Name] = specJSON
+	}
+
 	if err := RenderFederationTemplate(
 		gqlgencCfg.GQLConfig,
 		fragments,
@@ -112,8 +150,23 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		source.ResponseSubTypes(),
 		generateCfg,
 		clientPkg,
+		planSpecs,
 	); err != nil {
 		return fmt.Errorf("generate: render template: %w", err)
+	}
+
+	if err := WriteExecFile(filepath.Dir(cfg.Client.Filename), cfg.Client.Package); err != nil {
+		return fmt.Errorf("generate: write exec file: %w", err)
+	}
+
+	if cfg.Generate != nil && cfg.Generate.ExportOperations != "" {
+		exportPath := cfg.Generate.ExportOperations
+		if !filepath.IsAbs(exportPath) {
+			exportPath = filepath.Join(cfg.Dir, exportPath)
+		}
+		if err := exportOperations(exportPath, operations); err != nil {
+			return fmt.Errorf("generate: export operations to %s: %w", exportPath, err)
+		}
 	}
 
 	return nil
@@ -132,11 +185,23 @@ func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) (*gqlgencConfig.
 	return gqlgencCfg, nil
 }
 
+func hasGraphQLExt(p string) bool {
+	switch filepath.Ext(p) {
+	case ".graphql", ".graphqls", ".gql":
+		return true
+	}
+	return false
+}
+
+func hasGoExt(p string) bool { return filepath.Ext(p) == ".go" }
+
 func buildGenerateConfig(cfg *defConfig.Config) *gqlgencConfig.GenerateConfig {
 	if cfg.Generate == nil {
 		return &gqlgencConfig.GenerateConfig{}
 	}
-	gc := &gqlgencConfig.GenerateConfig{}
+	gc := &gqlgencConfig.GenerateConfig{
+		Optional: cfg.Generate.Optional,
+	}
 	if cfg.Generate.ClientInterfaceName != nil {
 		gc.ClientInterfaceName = cfg.Generate.ClientInterfaceName
 	}

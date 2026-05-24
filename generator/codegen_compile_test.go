@@ -69,47 +69,52 @@ var perCaseChecks = map[string]struct {
 	"01_product_id_sku": {
 		want: []string{
 			"GetProductIDSkuDocument",
+			"GetProductIDSkuPlanSpec",
 			`func (c *Client) GetProductIDSku(`,
-			`c.Client.Execute(ctx, GetProductIDSkuDocument, "GetProductIdSku"`,
-			"federationclient",
+			"ResolveURLSpec",
+			"ExecuteAndUnmarshal",
 		},
-		notWant: []string{"clientv2"},
+		notWant: []string{"clientv2", "federationclient"},
 	},
 	"02_product_delivery": {
 		want: []string{
 			"GetProductDeliveryDocument",
+			"GetProductDeliveryPlanSpec",
 			`func (c *Client) GetProductDelivery(`,
-			`c.Client.Execute(ctx, GetProductDeliveryDocument, "GetProductDelivery"`,
-			"federationclient",
+			"ResolveURLSpec",
+			"ExecuteAndUnmarshal",
 		},
-		notWant: []string{"clientv2"},
+		notWant: []string{"clientv2", "federationclient"},
 	},
 	"03_product_creator_name": {
 		want: []string{
 			"GetProductCreatorNameDocument",
+			"GetProductCreatorNamePlanSpec",
 			`func (c *Client) GetProductCreatorName(`,
-			`c.Client.Execute(ctx, GetProductCreatorNameDocument, "GetProductCreatorName"`,
-			"federationclient",
+			"ResolveURLSpec",
+			"ExecuteAndUnmarshal",
 		},
-		notWant: []string{"clientv2"},
+		notWant: []string{"clientv2", "federationclient"},
 	},
 	"04_product_creator_requires": {
 		want: []string{
 			"GetProductCreatorRequiresDocument",
+			"GetProductCreatorRequiresPlanSpec",
 			`func (c *Client) GetProductCreatorRequires(`,
-			`c.Client.Execute(ctx, GetProductCreatorRequiresDocument, "GetProductCreatorRequires"`,
-			"federationclient",
+			"ResolveURLSpec",
+			"ExecuteAndUnmarshal",
 		},
-		notWant: []string{"clientv2"},
+		notWant: []string{"clientv2", "federationclient"},
 	},
 	"05_product_creator_provides": {
 		want: []string{
 			"GetProductCreatorProvidesDocument",
+			"GetProductCreatorProvidesPlanSpec",
 			`func (c *Client) GetProductCreatorProvides(`,
-			`c.Client.Execute(ctx, GetProductCreatorProvidesDocument, "GetProductCreatorProvides"`,
-			"federationclient",
+			"ResolveURLSpec",
+			"ExecuteAndUnmarshal",
 		},
-		notWant: []string{"clientv2"},
+		notWant: []string{"clientv2", "federationclient"},
 	},
 }
 
@@ -134,6 +139,76 @@ func TestCodegenCompile(t *testing.T) {
 			runCodegenCompileCase(t, supergraphPath, fixtureName, query)
 		})
 	}
+}
+
+// TestCodegenCompileOptional verifies that optional: value strips pointer types
+// for nullable fields and optional: pointer (explicit) preserves them.
+func TestCodegenCompileOptional(t *testing.T) {
+	supergraphRel := filepath.Join("..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql")
+	supergraphPath, err := filepath.Abs(supergraphRel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(supergraphPath); os.IsNotExist(err) {
+		t.Skip("supergraph fixture not found, skipping")
+	}
+
+	// fixture 01: Sku is nullable in the schema (String), ID is non-null (ID!).
+	// With optional: pointer (default): Sku → *string.
+	// With optional: value:             Sku → string.
+	query := namedQuery["01_product_id_sku"]
+
+	t.Run("optional_value", func(t *testing.T) {
+		out := runCodegenWithOptional(t, supergraphPath, query, "value")
+		if strings.Contains(out, "Sku *string") {
+			t.Error("optional: value should produce Sku string, got Sku *string")
+		}
+		if !strings.Contains(out, "Sku string") {
+			t.Error("optional: value should produce Sku string")
+		}
+	})
+
+	t.Run("optional_pointer_explicit", func(t *testing.T) {
+		out := runCodegenWithOptional(t, supergraphPath, query, "pointer")
+		if !strings.Contains(out, "Sku *string") {
+			t.Error("optional: pointer should produce Sku *string")
+		}
+	})
+
+	t.Run("optional_default", func(t *testing.T) {
+		out := runCodegenWithOptional(t, supergraphPath, query, "")
+		if !strings.Contains(out, "Sku *string") {
+			t.Error("empty optional (default) should produce Sku *string")
+		}
+	})
+}
+
+func runCodegenWithOptional(t *testing.T, supergraphPath, query, optional string) string {
+	t.Helper()
+	tmpDir := t.TempDir()
+	queryFile := filepath.Join(tmpDir, "query.graphql")
+	if err := os.WriteFile(queryFile, []byte(query), 0644); err != nil {
+		t.Fatal(err)
+	}
+	outFile := filepath.Join(tmpDir, "client.go")
+	cfg := &defConfig.Config{
+		Schema: supergraphPath,
+		Query:  []string{queryFile},
+		Client: defConfig.PackageConfig{Filename: outFile, Package: "generated"},
+		Dir:    tmpDir,
+		Generate: &defConfig.GenerateConfig{
+			Optional: optional,
+		},
+	}
+	if err := Generate(context.Background(), cfg); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("optional=%q output:\n%s", optional, data)
+	return string(data)
 }
 
 func runCodegenCompileCase(t *testing.T, supergraphPath, fixtureName, query string) {
@@ -174,6 +249,12 @@ func runCodegenCompileCase(t *testing.T, supergraphPath, fixtureName, query stri
 	fset := token.NewFileSet()
 	if _, err := parser.ParseFile(fset, outFile, nil, parser.AllErrors); err != nil {
 		t.Errorf("generated file has syntax errors: %v", err)
+	}
+
+	// 1b. Verify federation_exec.go was written alongside client.go.
+	execFile := filepath.Join(tmpDir, "federation_exec.go")
+	if _, err := os.Stat(execFile); os.IsNotExist(err) {
+		t.Errorf("federation_exec.go not written to output dir")
 	}
 
 	// 2. Check for expected and forbidden content.

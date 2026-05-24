@@ -4,12 +4,13 @@
 // Usage with the modified gqlgenc generator.Generate:
 //
 //	err = generator.Generate(ctx, cfg,
-//	    api.ReplacePlugin(gqlgencfed.New(queryDoc, opDocs, cfg.Client, cfg.Generate)),
+//	    api.ReplacePlugin(gqlgencfed.New(queryDoc, opDocs, cfg.Client, cfg.Generate, supergraphSDL)),
 //	)
 package gqlgencfed
 
 import (
 	"fmt"
+	"path/filepath"
 
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
 	"github.com/99designs/gqlgen/plugin"
@@ -20,6 +21,7 @@ import (
 	"github.com/gqlgo/gqlgenc/querydocument"
 
 	"github.com/StevenACoffman/defederator/generator"
+	"github.com/StevenACoffman/gorouter/federation"
 
 	"github.com/vektah/gqlparser/v2/ast"
 )
@@ -35,16 +37,20 @@ type Plugin struct {
 	operationQueryDocuments []*ast.QueryDocument
 	client                  gqlgenConfig.PackageConfig
 	generateConfig          *gqlgencConfig.GenerateConfig
+	// supergraphSDL is the original Federation v2 SDL (with federation metadata).
+	// Required for building plan specs at generation time.
+	supergraphSDL string
 }
 
 // New constructs the plugin with pre-parsed query documents.
-// Pass pre-parsed documents when available, or nil to have MutateConfig
-// fall back to loading from queryFilePaths.
+// supergraphSDL is the original Federation v2 supergraph SDL (with federation metadata);
+// it is used to build per-operation plan specs at generation time.
 func New(
 	queryDocument *ast.QueryDocument,
 	operationQueryDocuments []*ast.QueryDocument,
 	client gqlgenConfig.PackageConfig,
 	generateConfig *gqlgencConfig.GenerateConfig,
+	supergraphSDL string,
 ) *Plugin {
 	if generateConfig == nil {
 		generateConfig = new(gqlgencConfig.GenerateConfig)
@@ -54,15 +60,18 @@ func New(
 		operationQueryDocuments: operationQueryDocuments,
 		client:                  client,
 		generateConfig:          generateConfig,
+		supergraphSDL:           supergraphSDL,
 	}
 }
 
 // NewWithFilePaths constructs the plugin with query file paths.
-// MutateConfig loads and parses the queries from these paths.
+// supergraphSDL is the original Federation v2 supergraph SDL (with federation metadata);
+// it is used to build per-operation plan specs at generation time.
 func NewWithFilePaths(
 	queryFilePaths []string,
 	client gqlgenConfig.PackageConfig,
 	generateConfig *gqlgencConfig.GenerateConfig,
+	supergraphSDL string,
 ) *Plugin {
 	if generateConfig == nil {
 		generateConfig = new(gqlgencConfig.GenerateConfig)
@@ -71,6 +80,7 @@ func NewWithFilePaths(
 		queryFilePaths: queryFilePaths,
 		client:         client,
 		generateConfig: generateConfig,
+		supergraphSDL:  supergraphSDL,
 	}
 }
 
@@ -118,6 +128,24 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		return fmt.Errorf("gqlgencfed: generate operations: %w", err)
 	}
 
+	sg, err := federation.ParseSchema(p.supergraphSDL)
+	if err != nil {
+		return fmt.Errorf("gqlgencfed: parse supergraph: %w", err)
+	}
+
+	planSpecs := make(map[string]string, len(operations))
+	for _, op := range operations {
+		plan, err := federation.BuildPlan(sg, op.Operation, op.Name)
+		if err != nil {
+			return fmt.Errorf("gqlgencfed: plan %q: %w", op.Name, err)
+		}
+		specJSON, err := generator.MarshalURLPlanSpec(plan)
+		if err != nil {
+			return fmt.Errorf("gqlgencfed: marshal plan spec %q: %w", op.Name, err)
+		}
+		planSpecs[op.Name] = specJSON
+	}
+
 	if err := generator.RenderFederationTemplate(
 		cfg,
 		fragments,
@@ -126,8 +154,13 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		source.ResponseSubTypes(),
 		p.generateConfig,
 		p.client,
+		planSpecs,
 	); err != nil {
 		return fmt.Errorf("gqlgencfed: render template: %w", err)
+	}
+
+	if err := generator.WriteExecFile(filepath.Dir(p.client.Filename), p.client.Package); err != nil {
+		return fmt.Errorf("gqlgencfed: write exec file: %w", err)
 	}
 
 	return nil

@@ -89,7 +89,7 @@ go install github.com/StevenACoffman/gowheels@latest
 ### Build Wheels Locally (No Upload)
 
 ```sh
-gowheels pypi --package-name defederatorgo --name defederator --repo StevenACoffman/defederator
+gowheels pypi --package-name defederator --name defederator --repo StevenACoffman/defederator
 ```
 
 gowheels writes wheels to `./dist/`. Inspect them before uploading.
@@ -100,7 +100,7 @@ gowheels writes wheels to `./dist/`. Inspect them before uploading.
 export GOWHEELS_GITHUB_TOKEN=<your-token>    # read as --github-token; avoids GitHub API rate limits
 export GOWHEELS_PYPI_TOKEN=<your-pypi-token> # read as --pypi-token; authenticates the upload
 
-gowheels pypi --name defederator --package-name defederatorgo --repo StevenACoffman/defederator --upload
+gowheels pypi --name defederator --package-name defederator --repo StevenACoffman/defederator --upload
 ```
 
 gowheels reads `GOWHEELS_GITHUB_TOKEN` and `GOWHEELS_PYPI_TOKEN` automatically
@@ -112,7 +112,7 @@ wheel, and uploads each wheel to PyPI.
 To target a specific release tag rather than the latest:
 
 ```sh
-gowheels pypi --name defederator --package-name defederatorgo --repo StevenACoffman/defederator --version v0.5.0 --upload
+gowheels pypi --name defederator --package-name defederator --repo StevenACoffman/defederator --version v0.5.0 --upload
 ```
 
 ---

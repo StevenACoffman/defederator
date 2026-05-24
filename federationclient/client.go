@@ -1,5 +1,6 @@
-// Package federationclient is the runtime imported by defederator-generated code.
-// It wraps the gorouter federation engine with plan caching and typed result marshaling.
+// Package federationclient is the slim runtime shim imported by defederator-generated code.
+// It resolves pre-built plan specs against a subgraph URL map at startup, then dispatches
+// operations to subgraphs via execengine. It has no dependency on the federation planner.
 package federationclient
 
 import (
@@ -7,56 +8,50 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sync"
 
-	"github.com/StevenACoffman/gorouter/federation"
+	"github.com/StevenACoffman/defederator/execengine"
 )
 
-// Supergraph is a type alias so callers don't need to import gorouter directly.
-type Supergraph = federation.Supergraph
-
-// ParseSupergraphSDL parses a Federation v2 supergraph SDL and returns a routing table.
-func ParseSupergraphSDL(sdl string) (*Supergraph, error) {
-	return federation.ParseSchema(sdl)
-}
-
-// Client holds a parsed supergraph, an HTTP client, and a plan cache.
-// Plans are deterministic for a given (supergraph, query, operationName) triple;
-// caching them avoids re-planning on every call.
+// Client holds pre-resolved federation plans and dispatches operations to subgraphs.
+// It is safe for concurrent use.
 type Client struct {
-	sg        *Supergraph
-	http      *http.Client
-	planCache sync.Map // cacheKey string → *federation.Plan
+	http  *http.Client
+	plans map[string]*execengine.Plan // opName → pre-resolved plan with URLs
 }
 
-// NewClient creates a federation client. If httpClient is nil, http.DefaultClient is used.
-func NewClient(sg *Supergraph, httpClient *http.Client) *Client {
+// NewClient decodes planSpecs against urls and returns a Client ready to execute any
+// registered operation. planSpecs maps operation name to a compact JSON-encoded plan spec
+// (as embedded by the code generator). urls maps subgraph enum names to their HTTP endpoints.
+// Returns an error if any spec is malformed or references a subgraph enum absent from urls.
+func NewClient(urls map[string]string, httpClient *http.Client, planSpecs map[string]string) (*Client, error) {
 	if httpClient == nil {
 		httpClient = http.DefaultClient
 	}
-	return &Client{sg: sg, http: httpClient}
+	plans := make(map[string]*execengine.Plan, len(planSpecs))
+	for opName, specJSON := range planSpecs {
+		plan, err := execengine.Resolve(specJSON, urls)
+		if err != nil {
+			return nil, fmt.Errorf("federationclient: resolve plan for %q: %w", opName, err)
+		}
+		plans[opName] = plan
+	}
+	return &Client{http: httpClient, plans: plans}, nil
 }
 
-// Execute runs a federated GraphQL operation and JSON-unmarshals the merged result into dest.
-// doc is the full query document string; operationName selects which operation to run.
-func (c *Client) Execute(ctx context.Context, doc, operationName string, vars map[string]any, dest any) error {
-	cacheKey := doc + "\x00" + operationName
-	v, ok := c.planCache.Load(cacheKey)
+// Execute runs the pre-built plan for opName and JSON-unmarshals the merged result into dest.
+// Returns an error if no plan was registered for opName at NewClient time.
+func (c *Client) Execute(ctx context.Context, opName string, vars map[string]any, dest any) error {
+	plan, ok := c.plans[opName]
 	if !ok {
-		plan, err := federation.BuildPlan(c.sg, doc, operationName)
-		if err != nil {
-			return fmt.Errorf("federationclient: plan %q: %w", operationName, err)
-		}
-		v, _ = c.planCache.LoadOrStore(cacheKey, plan)
+		return fmt.Errorf("federationclient: no plan for operation %q", opName)
 	}
-	plan := v.(*federation.Plan)
 
-	data, errs, err := federation.Execute(ctx, plan, vars, c.http)
+	data, errs, err := execengine.Execute(ctx, plan, vars, c.http)
 	if err != nil {
-		return fmt.Errorf("federationclient: execute %q: %w", operationName, err)
+		return fmt.Errorf("federationclient: execute %q: %w", opName, err)
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("federationclient: %q: %v", operationName, errs)
+		return fmt.Errorf("federationclient: %q: %v", opName, errs)
 	}
 
 	b, err := json.Marshal(data)

@@ -82,6 +82,9 @@ style = "backtick"  # mdformat defaults to backtick fences (tildes only as fallb
 # names = ["rumdl", "Markdown", "GitHub"]  # Proper names that should be capitalized correctly
 # code-blocks = false  # Check code blocks for proper names (default: false, skips code blocks)
 
+[MD010]
+code-blocks = false  # Go code in fenced blocks uses tab indentation; gofmt keeps them
+
 [MD060]
 enabled = true              # Default: opt-in for conservative adoption
 style = "aligned"            # Options: "aligned", "aligned-no-space", "compact", "tight", "any"
