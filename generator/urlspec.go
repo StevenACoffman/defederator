@@ -69,6 +69,20 @@ func MarshalURLPlanSpec(plan *federation.Plan) (string, error) {
 	return string(b), nil
 }
 
+// MarshalEnumPlanSpec converts a *federation.Plan to a compact JSON string using
+// enum-keyed format. Unlike MarshalURLPlanSpec, the subgraph URLs are NOT
+// embedded in the spec — instead each fetch uses the join__Graph enum name
+// (e.g. "USERS"). Call execengine.Resolve with a URL map at runtime to get a
+// Plan with real URLs. Use this when the supergraph SDL has placeholder URLs.
+func MarshalEnumPlanSpec(plan *federation.Plan) (string, error) {
+	spec := federation.PlanToSpec(plan)
+	b, err := json.Marshal(spec)
+	if err != nil {
+		return "", fmt.Errorf("generator: marshal enum plan spec: %w", err)
+	}
+	return string(b), nil
+}
+
 // WriteExecFile reads the embedded execengine source, replaces its package
 // declaration with pkg, and writes the result to <outDir>/federation_exec.go.
 // The written file gives generated code access to the executor without any

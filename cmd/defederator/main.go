@@ -45,6 +45,6 @@ func run() error {
 		return err
 	}
 
-	fmt.Fprintf(os.Stdout, "defederator: wrote %s\n", cfg.Client.Filename)
+	fmt.Fprintf(os.Stdout, "defederator: wrote %s\n", cfg.ClientFilename())
 	return nil
 }

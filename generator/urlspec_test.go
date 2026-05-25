@@ -105,6 +105,74 @@ func TestMarshalURLPlanSpec_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestMarshalEnumPlanSpec_RoundTrip verifies that MarshalEnumPlanSpec produces a
+// JSON string with subgraphEnum keys (not URLs), and that execengine.Resolve can
+// decode it into a valid Plan when supplied a URL map.
+func TestMarshalEnumPlanSpec_RoundTrip(t *testing.T) {
+	sg := loadTestSupergraph(t)
+
+	cases := map[string]struct {
+		query           string
+		wantEnum        string
+		wantEntityFetch bool
+	}{
+		"single_subgraph": {
+			query:    query01,
+			wantEnum: "PRODUCTS",
+		},
+		"with_entity_fetch": {
+			query:           query02,
+			wantEnum:        "PRODUCTS",
+			wantEntityFetch: true,
+		},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			plan, err := federation.BuildPlan(sg, tc.query, "")
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+
+			specJSON, err := MarshalEnumPlanSpec(plan)
+			if err != nil {
+				t.Fatalf("MarshalEnumPlanSpec: %v", err)
+			}
+
+			// The spec must use subgraphEnum keys, not literal URLs.
+			if !strings.Contains(specJSON, "subgraphEnum") {
+				t.Errorf("specJSON missing 'subgraphEnum'; got:\n%s", specJSON)
+			}
+			if strings.Contains(specJSON, "PRODUCTS_URL") {
+				t.Error("specJSON contains URL placeholder; expected enum-keyed format")
+			}
+			if !strings.Contains(specJSON, tc.wantEnum) {
+				t.Errorf("specJSON missing expected enum %q:\n%s", tc.wantEnum, specJSON)
+			}
+
+			// Round-trip: Resolve must decode back to a valid Plan when given a URL map.
+			urls := map[string]string{
+				"PRODUCTS":  "https://products.example.com/graphql",
+				"INVENTORY": "https://inventory.example.com/graphql",
+			}
+			resolved, err := execengine.Resolve(specJSON, urls)
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			if len(resolved.Fetches) == 0 {
+				t.Fatal("resolved plan has no fetches")
+			}
+			if resolved.Fetches[0].URL != urls[tc.wantEnum] {
+				t.Errorf("resolved fetch URL: got %q, want %q",
+					resolved.Fetches[0].URL, urls[tc.wantEnum])
+			}
+			if tc.wantEntityFetch && len(resolved.EntityFetches) == 0 {
+				t.Error("expected entity fetches in resolved plan")
+			}
+		})
+	}
+}
+
 // TestWriteExecFile_PackageDecl verifies that federation_exec.go is written with
 // the correct package declaration.
 func TestWriteExecFile_PackageDecl(t *testing.T) {

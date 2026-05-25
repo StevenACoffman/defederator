@@ -65,6 +65,14 @@ type Config struct {
 	// Generate controls optional generation behaviours.
 	Generate *GenerateConfig `yaml:"generate,omitempty"`
 
+	// URLMode controls how subgraph URLs appear in generated plan specs.
+	// "baked" (default): URLs from the supergraph SDL are embedded in the
+	// plan spec constants at generation time. NewClient takes only an *http.Client.
+	// "enum": plan specs use subgraph enum names; URLs are provided at runtime.
+	// NewClient takes an additional subgraphURLs map[string]string parameter.
+	// Use "enum" when the supergraph SDL contains placeholder URLs (e.g. "unused").
+	URLMode string `yaml:"url_mode,omitempty"`
+
 	// Dir is the base directory for resolving relative paths (not serialised).
 	Dir string `yaml:"-"`
 }
@@ -140,6 +148,11 @@ func findConfig(dir string) (string, error) {
 // SchemaPath returns the absolute path to the supergraph SDL.
 func (c *Config) SchemaPath() string {
 	return c.resolvePath(c.Schema)
+}
+
+// ClientFilename returns the absolute path for the generated client file.
+func (c *Config) ClientFilename() string {
+	return c.resolvePath(c.Client.Filename)
 }
 
 // resolvePath resolves p relative to the config file's directory.

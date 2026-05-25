@@ -424,3 +424,130 @@ func TestFilterVars_Subset(t *testing.T) {
 		t.Error("extra variable should not have been forwarded")
 	}
 }
+
+// TestExecuteAndUnmarshal_SingleFetch_NullData verifies the fast path handles
+// a subgraph that returns null data without panicking.
+func TestExecuteAndUnmarshal_SingleFetch_NullData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":null}`))
+	}))
+	defer srv.Close()
+
+	plan := &execengine.Plan{
+		Fetches: []execengine.Fetch{{URL: srv.URL, Query: `{ product { id } }`}},
+	}
+	type result struct {
+		Product *struct{ ID string `json:"id"` } `json:"product"`
+	}
+	var dest result
+	if err := execengine.ExecuteAndUnmarshal(context.Background(), plan, nil, nil, &dest); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if dest.Product != nil {
+		t.Errorf("expected nil Product for null data, got %+v", dest.Product)
+	}
+}
+
+// TestExecuteAndUnmarshal_MultiFetch_SlowPath verifies the general path merges
+// data from two fetches and populates the typed destination struct.
+func TestExecuteAndUnmarshal_MultiFetch_SlowPath(t *testing.T) {
+	type userResult struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	type postResult struct {
+		Title string `json:"title"`
+	}
+	type dest struct {
+		User *userResult `json:"user"`
+		Post *postResult `json:"post"`
+	}
+
+	srvUser := httptest.NewServer(jsonResp(t, map[string]any{
+		"user": map[string]any{"id": "u1", "name": "Alice"},
+	}))
+	defer srvUser.Close()
+
+	srvPost := httptest.NewServer(jsonResp(t, map[string]any{
+		"post": map[string]any{"title": "Hello"},
+	}))
+	defer srvPost.Close()
+
+	plan := &execengine.Plan{
+		Fetches: []execengine.Fetch{
+			{URL: srvUser.URL, Query: `{ user { id name } }`},
+			{URL: srvPost.URL, Query: `{ post { title } }`},
+		},
+	}
+
+	var got dest
+	if err := execengine.ExecuteAndUnmarshal(context.Background(), plan, nil, nil, &got); err != nil {
+		t.Fatalf("ExecuteAndUnmarshal: %v", err)
+	}
+	if got.User == nil || got.User.Name != "Alice" {
+		t.Errorf("user: got %+v", got.User)
+	}
+	if got.Post == nil || got.Post.Title != "Hello" {
+		t.Errorf("post: got %+v", got.Post)
+	}
+}
+
+// TestExecuteAndUnmarshal_EntityFetch_SlowPath verifies that entity-fetch
+// operations still take the general path and correctly merge entity fields.
+func TestExecuteAndUnmarshal_EntityFetch_SlowPath(t *testing.T) {
+	type product struct {
+		ID  string `json:"id"`
+		Sku string `json:"sku"`
+	}
+	type result struct {
+		Product *product `json:"product"`
+	}
+
+	sgA := httptest.NewServer(jsonResp(t, map[string]any{
+		"product": map[string]any{"id": "p1", "__typename": "Product"},
+	}))
+	defer sgA.Close()
+
+	sgB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := json.Marshal(map[string]any{
+			"data": map[string]any{
+				"_entities": []any{
+					map[string]any{"sku": "fed-sku"},
+				},
+			},
+		})
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(b)
+	}))
+	defer sgB.Close()
+
+	plan := &execengine.Plan{
+		Fetches: []execengine.Fetch{
+			{URL: sgA.URL, Query: `{ product(id: "p1") { id __typename } }`},
+		},
+		EntityFetches: []execengine.EntityFetch{
+			{
+				URL:        sgB.URL,
+				TypeName:   "Product",
+				KeyFields:  []string{"id"},
+				Selection:  "sku\n",
+				ParentPath: []string{"product"},
+			},
+		},
+	}
+
+	var got result
+	if err := execengine.ExecuteAndUnmarshal(context.Background(), plan, nil, nil, &got); err != nil {
+		t.Fatalf("ExecuteAndUnmarshal: %v", err)
+	}
+	if got.Product == nil {
+		t.Fatal("Product is nil")
+	}
+	if got.Product.ID != "p1" {
+		t.Errorf("ID: got %q, want %q", got.Product.ID, "p1")
+	}
+	if got.Product.Sku != "fed-sku" {
+		t.Errorf("Sku: got %q, want %q", got.Product.Sku, "fed-sku")
+	}
+}

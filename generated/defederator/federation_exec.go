@@ -1,7 +1,7 @@
 // Package execengine executes a pre-built federation Plan against subgraph HTTP endpoints.
 // It has no dependency on the query planner — all routing decisions (which subgraph owns
 // which field, key fields for entity resolution, etc.) are encoded in the Plan at build time.
-package execengine
+package defederator
 
 import (
 	"bytes"
@@ -172,30 +172,7 @@ func ResolveURLSpec(specJSON string) (*Plan, error) {
 
 // ExecuteAndUnmarshal runs plan and JSON-unmarshals the merged result into dest.
 // It is a convenience wrapper around Execute for use in generated code.
-//
-// Fast path: when the plan has exactly one fetch and no entity fetches,
-// the subgraph response is unmarshaled directly into dest — no intermediate
-// map[string]any allocation or re-marshal step.
 func ExecuteAndUnmarshal(ctx context.Context, plan *Plan, vars map[string]any, client *http.Client, dest any) error {
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	// Single-subgraph fast path: skip Execute() and the map[string]any round-trip.
-	// json.Unmarshal into a typed struct silently ignores planner-added fields
-	// (__typename, key fields) that are not in the struct — projection is a no-op here.
-	if len(plan.Fetches) == 1 && len(plan.EntityFetches) == 0 {
-		f := plan.Fetches[0]
-		resp, err := doGraphQL(ctx, client, f.URL, f.Query, "", filterVars(vars, f.Variables))
-		if err != nil {
-			return fmt.Errorf("execengine: fetch %s: %w", f.URL, err)
-		}
-		if len(resp.Errors) > 0 {
-			return fmt.Errorf("execengine: %v", resp.Errors)
-		}
-		return json.Unmarshal(resp.Data, dest)
-	}
-
 	data, errs, err := Execute(ctx, plan, vars, client)
 	if err != nil {
 		return err

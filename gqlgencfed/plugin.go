@@ -155,6 +155,7 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		p.generateConfig,
 		p.client,
 		planSpecs,
+		"baked",
 	); err != nil {
 		return fmt.Errorf("gqlgencfed: render template: %w", err)
 	}

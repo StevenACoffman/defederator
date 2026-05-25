@@ -58,6 +58,29 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: init gqlgen config: %w", err)
 	}
 
+	// Map user-defined types that lack an explicit binding to graphql.String.
+	// gqlgenc calls Type(name) for any field where IsBasicType() returns true —
+	// this includes enums (no sub-selections) and input types (used as arguments).
+	// gqlgen's Init() adds introspection enums but leaves user-defined enums and
+	// input objects unmapped when no server model file is generated.
+	// Mapping them to string lets the generated client compile; the actual wire
+	// representation is handled by the JSON marshaler in the operation methods.
+	if gqlgencCfg.GQLConfig.Models == nil {
+		gqlgencCfg.GQLConfig.Models = make(gqlgenConfig.TypeMap)
+	}
+	for name, def := range gqlgencCfg.GQLConfig.Schema.Types {
+		switch def.Kind {
+		case "ENUM", "INPUT_OBJECT":
+		default:
+			continue
+		}
+		if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
+			gqlgencCfg.GQLConfig.Models[name] = gqlgenConfig.TypeMapEntry{
+				Model: gqlgenConfig.StringList{"github.com/99designs/gqlgen/graphql.String"},
+			}
+		}
+	}
+
 	// Schema.Implements iteration order is non-deterministic; sort for stable output.
 	for _, v := range gqlgencCfg.GQLConfig.Schema.Implements {
 		sort.Slice(v, func(i, j int) bool { return v[i].Name < v[j].Name })
@@ -105,7 +128,7 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	}
 
 	clientPkg := gqlgenConfig.PackageConfig{
-		Filename: cfg.Client.Filename,
+		Filename: cfg.ClientFilename(),
 		Package:  cfg.Client.Package,
 	}
 
@@ -129,13 +152,23 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: generate operations: %w", err)
 	}
 
+	urlMode := cfg.URLMode
+	if urlMode == "" {
+		urlMode = "baked"
+	}
+
+	marshalSpec := MarshalURLPlanSpec
+	if urlMode == "enum" {
+		marshalSpec = MarshalEnumPlanSpec
+	}
+
 	planSpecs := make(map[string]string, len(operations))
 	for _, op := range operations {
 		plan, err := federation.BuildPlan(sg, op.Operation, op.Name)
 		if err != nil {
 			return fmt.Errorf("generate: plan %q: %w", op.Name, err)
 		}
-		specJSON, err := MarshalURLPlanSpec(plan)
+		specJSON, err := marshalSpec(plan)
 		if err != nil {
 			return fmt.Errorf("generate: marshal plan spec %q: %w", op.Name, err)
 		}
@@ -151,11 +184,12 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		generateCfg,
 		clientPkg,
 		planSpecs,
+		urlMode,
 	); err != nil {
 		return fmt.Errorf("generate: render template: %w", err)
 	}
 
-	if err := WriteExecFile(filepath.Dir(cfg.Client.Filename), cfg.Client.Package); err != nil {
+	if err := WriteExecFile(filepath.Dir(cfg.ClientFilename()), cfg.Client.Package); err != nil {
 		return fmt.Errorf("generate: write exec file: %w", err)
 	}
 
@@ -176,6 +210,20 @@ func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) (*gqlgencConfig.
 	gqlCfg := gqlgenConfig.DefaultConfig()
 	gqlCfg.Sources = []*ast.Source{
 		{Name: "supergraph", Input: cleanSDL},
+	}
+
+	// Convert defederator bindings: to gqlgen Models TypeMap entries.
+	// Each binding maps a GraphQL scalar name to a Go type path, which is what
+	// gqlgen's type binder needs to resolve response field types.
+	if len(cfg.Bindings) > 0 {
+		if gqlCfg.Models == nil {
+			gqlCfg.Models = make(gqlgenConfig.TypeMap, len(cfg.Bindings))
+		}
+		for graphqlName, binding := range cfg.Bindings {
+			gqlCfg.Models[graphqlName] = gqlgenConfig.TypeMapEntry{
+				Model: gqlgenConfig.StringList{binding.Type},
+			}
+		}
 	}
 
 	gqlgencCfg := &gqlgencConfig.Config{

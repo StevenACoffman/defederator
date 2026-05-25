@@ -15,30 +15,99 @@
         }
     {{- end }}
 
+	// Client executes federation operations. Use NewClient or NewClientWithHTTPFactory
+	// for simple cases; use NewClientWithFactories for webapp-style per-request URL
+	// resolution via service discovery.
 	type Client struct {
-	    http  *http.Client
-	    plans map[string]*Plan
+	    httpFor    func(context.Context) *http.Client
+	    resolveFor func(ctx context.Context, specJSON string) (*Plan, error)
 	}
 
+    {{- if .URLModeEnum }}
+    // NewClient builds the federation client with a fixed HTTP client and static
+    // subgraph URLs. subgraphURLs maps join__Graph enum names (e.g. "USERS") to their
+    // actual HTTP endpoints. All enum names referenced by any operation must be present;
+    // missing entries are caught at construction time.
+    func NewClient(httpClient *http.Client, subgraphURLs map[string]string) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+        if httpClient == nil {
+            httpClient = http.DefaultClient
+        }
+        return NewClientWithHTTPFactory(func(_ context.Context) *http.Client { return httpClient }, subgraphURLs)
+    }
+
+    // NewClientWithHTTPFactory builds the federation client with a per-call HTTP factory
+    // and static subgraph URLs. httpFactory is called on every operation with the request
+    // context, allowing callers to supply a context-scoped HTTP client (e.g. one that
+    // carries per-request auth headers or tracing). subgraphURLs maps join__Graph enum
+    // names (e.g. "USERS") to their actual HTTP endpoints.
+    func NewClientWithHTTPFactory(httpFactory func(context.Context) *http.Client, subgraphURLs map[string]string) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+        if httpFactory == nil {
+            httpFactory = func(_ context.Context) *http.Client { return http.DefaultClient }
+        }
+        // Validate all specs against the URL map at construction time so callers
+        // catch missing subgraph entries immediately rather than at first call.
+        for opName, specJSON := range map[string]string{
+            {{- range $model := .Operation}}
+            "{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
+            {{- end}}
+        } {
+            if _, err := Resolve(specJSON, subgraphURLs); err != nil {
+                return nil, fmt.Errorf("federation client: validate plan for %q: %w", opName, err)
+            }
+        }
+        return &Client{
+            httpFor:    httpFactory,
+            resolveFor: func(_ context.Context, specJSON string) (*Plan, error) { return Resolve(specJSON, subgraphURLs) },
+        }, nil
+    }
+
+    // NewClientWithFactories builds the federation client with per-call factories for
+    // both the HTTP client and plan resolution. Use this when subgraph URLs must be
+    // resolved per-request (e.g. from a context-aware service-discovery client).
+    // resolveFor receives the full operation's plan-spec JSON and must return a resolved
+    // Plan; it may call Resolve(specJSON, urls) with URLs fetched from the context.
+    // Unlike NewClient, this constructor does not validate plans at construction time.
+    func NewClientWithFactories(
+        httpFactory func(context.Context) *http.Client,
+        resolveFor func(ctx context.Context, specJSON string) (*Plan, error),
+    ) {{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }} {
+        if httpFactory == nil {
+            httpFactory = func(_ context.Context) *http.Client { return http.DefaultClient }
+        }
+        return &Client{httpFor: httpFactory, resolveFor: resolveFor}
+    }
+    {{- else }}
+    // NewClient builds the federation client with a fixed HTTP client. URLs are baked
+    // into the plan specs at code-generation time and require no URL map at runtime.
     func NewClient(httpClient *http.Client) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
         if httpClient == nil {
             httpClient = http.DefaultClient
         }
-        specs := map[string]string{
+        return NewClientWithHTTPFactory(func(_ context.Context) *http.Client { return httpClient })
+    }
+
+    // NewClientWithHTTPFactory builds the federation client with a per-call HTTP factory.
+    // httpFactory is called on every operation with the request context.
+    func NewClientWithHTTPFactory(httpFactory func(context.Context) *http.Client) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+        if httpFactory == nil {
+            httpFactory = func(_ context.Context) *http.Client { return http.DefaultClient }
+        }
+        // Validate all specs parse correctly at construction time.
+        for opName, specJSON := range map[string]string{
             {{- range $model := .Operation}}
             "{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
             {{- end}}
-        }
-        plans := make(map[string]*Plan, len(specs))
-        for opName, specJSON := range specs {
-            plan, err := ResolveURLSpec(specJSON)
-            if err != nil {
-                return nil, fmt.Errorf("federation client: resolve plan for %q: %w", opName, err)
+        } {
+            if _, err := ResolveURLSpec(specJSON); err != nil {
+                return nil, fmt.Errorf("federation client: validate plan for %q: %w", opName, err)
             }
-            plans[opName] = plan
         }
-        return &Client{http: httpClient, plans: plans}, nil
+        return &Client{
+            httpFor:    httpFactory,
+            resolveFor: func(_ context.Context, specJSON string) (*Plan, error) { return ResolveURLSpec(specJSON) },
+        }, nil
     }
+    {{- end}}
 
 {{- end }}
 
@@ -66,14 +135,18 @@
 
 	{{- if $.GenerateClient }}
 		func (c *Client) {{ $model.Name|go }} (ctx context.Context{{- range $arg := .Args }}, {{ $arg.Variable | goPrivate }} {{ $arg.Type | ref }} {{- end }}) (*{{ $model.ResponseStructName | go }}, error) {
-			vars := map[string]any{
+			plan, err := c.resolveFor(ctx, {{ $model.Name|go }}PlanSpec)
+			if err != nil {
+				return nil, fmt.Errorf("{{ $model.Name }}: resolve plan: %w", err)
+			}
+			_opVars := map[string]any{
 			{{- range $args := .VariableDefinitions}}
 				"{{ $args.Variable }}": {{ $args.Variable | goPrivate }},
 			{{- end }}
 			}
 
 			var res {{ $model.ResponseStructName | go }}
-			if err := ExecuteAndUnmarshal(ctx, c.plans["{{ $model.Name }}"], vars, c.http, &res); err != nil {
+			if err := ExecuteAndUnmarshal(ctx, plan, _opVars, c.httpFor(ctx), &res); err != nil {
 				return nil, err
 			}
 
