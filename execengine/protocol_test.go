@@ -1,4 +1,4 @@
-package execengine_test
+package execengine
 
 import (
 	"context"
@@ -7,15 +7,14 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/StevenACoffman/defederator/execengine"
 )
 
 // TestExecute_ProtocolEdgeCases verifies Layer 1: the executor handles all legal
 // GraphQL HTTP response shapes without panicking or silently discarding information.
 func TestExecute_ProtocolEdgeCases(t *testing.T) {
-	simplePlan := func(url string) *execengine.Plan {
-		return &execengine.Plan{
-			Fetches: []execengine.Fetch{{URL: url, Query: `{ q }`}},
+	simplePlan := func(url string) *Plan {
+		return &Plan{
+			Fetches: []Fetch{{URL: url, Query: `{ q }`}},
 		}
 	}
 
@@ -102,7 +101,7 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 				cancel() // cancel before Execute is called
 			}
 
-			_, errs, err := execengine.Execute(ctx, simplePlan(srv.URL), nil, nil)
+			_, errs, err := execute(ctx, simplePlan(srv.URL), nil, nil, false)
 
 			if tc.wantTransErr {
 				if err == nil {

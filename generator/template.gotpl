@@ -2,6 +2,7 @@
 	{{ reserveImport "context" }}
 	{{ reserveImport "fmt" }}
 	{{ reserveImport "net/http" }}
+	{{- if .HasTypedEntityFetch }}{{ reserveImport "encoding/json" }}{{ end }}
 
 	{{- range $model := .Operation}}
 	const {{ $model.Name|go }}PlanSpec = `{{ index $.PlanSpecs $model.Name }}`
@@ -116,18 +117,21 @@
 
     {{ genGetters (.Name|go) .Type }}
     {{ genConversionGetters (.Name|go) .SpreadFragments }}
+    {{ genUnmarshalJSON (.Name|go) .Type }}
 {{- end }}
 
 {{- range $name, $element := .StructSources }}
 	type {{ .Name }} {{ .Type | ref }}
 
     {{ genGetters .Name .Type }}
+    {{ genUnmarshalJSON .Name .Type }}
 {{- end}}
 
 {{- range $name, $element := .OperationResponse }}
 	type  {{ .Name | go  }} {{ .Type | ref }}
 
     {{ genGetters (.Name|go) .Type }}
+    {{ genUnmarshalJSON (.Name|go) .Type }}
 {{- end }}
 
 {{- range $model := .Operation}}
@@ -146,10 +150,14 @@
 			}
 
 			var res {{ $model.ResponseStructName | go }}
+			{{- $efCode := genEntityFetch . }}
+			{{- if $efCode }}
+			{{ $efCode }}
+			{{- else }}
 			if err := ExecuteAndUnmarshal(ctx, plan, _opVars, c.httpFor(ctx), &res); err != nil {
 				return nil, err
 			}
-
+			{{- end }}
 			return &res, nil
 		}
 	{{- end}}

@@ -55,6 +55,14 @@ var namedQuery = map[string]string{
     }
   }
 }`,
+	"06_product_creator_years": `query GetProductCreatorYears {
+  product(id: "apollo-federation") {
+    createdBy {
+      email
+      yearsOfEmployment
+    }
+  }
+}`,
 }
 
 // perCaseChecks lists strings that must appear in the generated output for
@@ -76,15 +84,20 @@ var perCaseChecks = map[string]struct {
 		},
 		notWant: []string{"clientv2", "federationclient"},
 	},
+	// 02 has an entity fetch → typed merge code using httpPost; no ExecuteAndUnmarshal for this op.
 	"02_product_delivery": {
 		want: []string{
 			"GetProductDeliveryDocument",
 			"GetProductDeliveryPlanSpec",
 			`func (c *Client) GetProductDelivery(`,
 			"ResolveURLSpec",
-			"ExecuteAndUnmarshal",
+			"encoding/json",
+			"json.RawMessage",
+			"plan.EntityFetches[0].Query",
+			"buildEntityFetchVars",
+			"httpPost",
 		},
-		notWant: []string{"clientv2", "federationclient"},
+		notWant: []string{"clientv2", "federationclient", "doGraphQL", "buildEntityQuery"},
 	},
 	"03_product_creator_name": {
 		want: []string{
@@ -115,6 +128,27 @@ var perCaseChecks = map[string]struct {
 			"ExecuteAndUnmarshal",
 		},
 		notWant: []string{"clientv2", "federationclient"},
+	},
+	// 06 has an entity fetch with no @requires → optimized typed path (Fix 1 + Fix 2).
+	"06_product_creator_years": {
+		want: []string{
+			"GetProductCreatorYearsDocument",
+			"GetProductCreatorYearsPlanSpec",
+			`func (c *Client) GetProductCreatorYears(`,
+			"ResolveURLSpec",
+			"_wr.Data = &res",
+			"plan.EntityFetches[0].Query",
+			"buildEntityFetchVars",
+			"httpPost",
+		},
+		notWant: []string{
+			"clientv2",
+			"federationclient",
+			"ExecuteAndUnmarshal",
+			"var _raw json.RawMessage",
+			"_ef0keys",
+			"buildEntityQuery",
+		},
 	},
 }
 

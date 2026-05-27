@@ -10,7 +10,6 @@ package graphqlcompat
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -50,24 +49,17 @@ func (c *client) MakeRequest(ctx context.Context, req *graphql.Request, resp *gr
 	}
 	ep := v.(*execengine.Plan)
 
-	vars, err := toVarMap(req.Variables)
-	if err != nil {
-		return fmt.Errorf("graphqlcompat: marshal variables: %w", err)
+	// When genqlient pre-sets resp.Data to a typed pointer, pass it directly so
+	// json.Unmarshal fills the concrete struct. When resp.Data is nil (bare callers),
+	// pass &resp.Data so it is populated with map[string]any.
+	dest := any(&resp.Data)
+	if resp.Data != nil {
+		dest = resp.Data
 	}
-
-	data, errs, err := execengine.Execute(ctx, ep, vars, c.http)
-	if err != nil {
+	if err := execengine.ExecuteAndUnmarshal(ctx, ep, req.Variables, c.http, dest); err != nil {
 		return fmt.Errorf("graphqlcompat: execute %q: %w", req.OpName, err)
 	}
-	if len(errs) > 0 {
-		return fmt.Errorf("graphqlcompat: %q: %v", req.OpName, errs)
-	}
-
-	b, err := json.Marshal(data)
-	if err != nil {
-		return fmt.Errorf("graphqlcompat: marshal result: %w", err)
-	}
-	return json.Unmarshal(b, &resp.Data)
+	return nil
 }
 
 // planToExec converts a resolved *federation.Plan to an *execengine.Plan by
@@ -111,19 +103,4 @@ func projectionToExec(proj []*federation.FieldProjection) []*execengine.FieldPro
 		}
 	}
 	return out
-}
-
-func toVarMap(v any) (map[string]any, error) {
-	if v == nil {
-		return nil, nil
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil, err
-	}
-	var m map[string]any
-	if err := json.Unmarshal(b, &m); err != nil {
-		return nil, err
-	}
-	return m, nil
 }

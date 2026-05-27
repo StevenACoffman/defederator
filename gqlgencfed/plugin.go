@@ -30,7 +30,7 @@ var _ plugin.ConfigMutator = &Plugin{}
 
 // Plugin is the federation code-gen plugin for gqlgenc.
 // It replaces clientgenv2.Plugin (shares the name "clientgen") and renders
-// with the federation template that uses federationclient.Client.Execute.
+// typed clients that call generated federation_exec.go directly.
 type Plugin struct {
 	queryFilePaths          []string
 	queryDocument           *ast.QueryDocument

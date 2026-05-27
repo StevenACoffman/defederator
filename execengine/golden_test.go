@@ -1,4 +1,4 @@
-package execengine_test
+package execengine
 
 // Golden fixture tests (Layer 2 + Layer 3):
 // Drives all five federation golden fixtures through scripted HTTP subgraph servers
@@ -12,8 +12,8 @@ package execengine_test
 // authoritative spec; files without (RAW_ONLY, e.g. PRODUCTS_1.json) are
 // intermediate duplicates and are skipped.
 //
-// This file imports gorouter/federation to build plans; the execengine package
-// itself stays stdlib-only (the import appears only in the _test external package).
+// This file imports gorouter/federation to build plans. That import appears only in
+// _test.go files and does not affect execengine's production dependency graph.
 
 import (
 	"context"
@@ -28,7 +28,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/StevenACoffman/defederator/execengine"
 	"github.com/StevenACoffman/gorouter/federation"
 )
 
@@ -268,7 +267,7 @@ func TestGoldenFixtures(t *testing.T) {
 
 			epPlan := planToExecPlan(t, plan)
 
-			data, errs, err := execengine.Execute(context.Background(), epPlan, fx.vars, nil)
+			raw, errs, err := execute(context.Background(), epPlan, fx.vars, nil, false)
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
@@ -277,9 +276,11 @@ func TestGoldenFixtures(t *testing.T) {
 			}
 
 			// Layer 3: merged output must match expected.json["data"].
+			// Unmarshal both sides into map[string]any for order-independent comparison.
+			gotData := mergedToMap(t, raw)
 			wantData, _ := fx.expected["data"].(map[string]any)
-			if !reflect.DeepEqual(data, wantData) {
-				gotJSON, _ := json.MarshalIndent(data, "", "  ")
+			if !reflect.DeepEqual(gotData, wantData) {
+				gotJSON, _ := json.MarshalIndent(gotData, "", "  ")
 				wantJSON, _ := json.MarshalIndent(wantData, "", "  ")
 				t.Errorf("merged output mismatch:\ngot:\n%s\nwant:\n%s", gotJSON, wantJSON)
 			}
@@ -287,23 +288,23 @@ func TestGoldenFixtures(t *testing.T) {
 	}
 }
 
-// planToExecPlan converts a *federation.Plan to *execengine.Plan by directly
+// planToExecPlan converts a *federation.Plan to *Plan by directly
 // mapping the resolved *Subgraph URL pointers — no JSON round-trip needed here.
-func planToExecPlan(t *testing.T, plan *federation.Plan) *execengine.Plan {
+func planToExecPlan(t *testing.T, plan *federation.Plan) *Plan {
 	t.Helper()
-	ep := &execengine.Plan{
-		Fetches:    make([]execengine.Fetch, 0, len(plan.Fetches)),
+	ep := &Plan{
+		Fetches:    make([]Fetch, 0, len(plan.Fetches)),
 		Projection: convertProjection(plan.Projection),
 	}
 	for _, f := range plan.Fetches {
-		ep.Fetches = append(ep.Fetches, execengine.Fetch{
+		ep.Fetches = append(ep.Fetches, Fetch{
 			URL:       f.Subgraph.URL,
 			Query:     f.Query,
 			Variables: f.Variables,
 		})
 	}
 	for _, ef := range plan.EntityFetches {
-		ep.EntityFetches = append(ep.EntityFetches, execengine.EntityFetch{
+		ep.EntityFetches = append(ep.EntityFetches, EntityFetch{
 			URL:            ef.Subgraph.URL,
 			TypeName:       ef.TypeName,
 			KeyFields:      ef.KeyFields,
@@ -316,16 +317,29 @@ func planToExecPlan(t *testing.T, plan *federation.Plan) *execengine.Plan {
 	return ep
 }
 
-func convertProjection(fps []*federation.FieldProjection) []*execengine.FieldProjection {
+func convertProjection(fps []*federation.FieldProjection) []*FieldProjection {
 	if fps == nil {
 		return nil
 	}
-	out := make([]*execengine.FieldProjection, len(fps))
+	out := make([]*FieldProjection, len(fps))
 	for i, fp := range fps {
-		out[i] = &execengine.FieldProjection{
+		out[i] = &FieldProjection{
 			Key:      fp.Key,
 			Children: convertProjection(fp.Children),
 		}
+	}
+	return out
+}
+
+func mergedToMap(t *testing.T, m rawMerged) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatalf("mergedToMap marshal: %v", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		t.Fatalf("mergedToMap unmarshal: %v", err)
 	}
 	return out
 }

@@ -1,4 +1,4 @@
-package execengine_test
+package execengine
 
 import (
 	"context"
@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/StevenACoffman/defederator/execengine"
 )
 
 // captureRequest starts a server that saves the most recent request body and
@@ -125,11 +124,11 @@ func TestEntities_Protocol(t *testing.T) {
 			entitySrv, getBody := captureRequest(t, tc.entityResp)
 			defer entitySrv.Close()
 
-			plan := &execengine.Plan{
-				Fetches: []execengine.Fetch{
+			plan := &Plan{
+				Fetches: []Fetch{
 					{URL: initSrv.URL, Query: `{ result { id email totalProductsCreated extraField } }`},
 				},
-				EntityFetches: []execengine.EntityFetch{
+				EntityFetches: []EntityFetch{
 					{
 						URL:            entitySrv.URL,
 						TypeName:       tc.typeName,
@@ -140,11 +139,11 @@ func TestEntities_Protocol(t *testing.T) {
 						IsParentList:   tc.isParentList,
 					},
 				},
-				Projection: []*execengine.FieldProjection{
+				Projection: []*FieldProjection{
 					{Key: tc.parentPathKey},
 				},
 			}
-			_, _, err := execengine.Execute(context.Background(), plan, nil, nil)
+			_, _, err := execute(context.Background(), plan, nil, nil, false)
 			if err != nil {
 				t.Fatalf("Execute: %v", err)
 			}
@@ -212,11 +211,11 @@ func TestEntities_ListParent(t *testing.T) {
 	entitySrv, getBody := captureRequest(t, mustMarshal(t, entityResp))
 	defer entitySrv.Close()
 
-	plan := &execengine.Plan{
-		Fetches: []execengine.Fetch{
+	plan := &Plan{
+		Fetches: []Fetch{
 			{URL: initSrv.URL, Query: `{ products { id } }`},
 		},
-		EntityFetches: []execengine.EntityFetch{
+		EntityFetches: []EntityFetch{
 			{
 				URL:          entitySrv.URL,
 				TypeName:     "Product",
@@ -226,14 +225,14 @@ func TestEntities_ListParent(t *testing.T) {
 				IsParentList: true,
 			},
 		},
-		Projection: []*execengine.FieldProjection{
-			{Key: "products", Children: []*execengine.FieldProjection{
+		Projection: []*FieldProjection{
+			{Key: "products", Children: []*FieldProjection{
 				{Key: "id"}, {Key: "sku"},
 			}},
 		},
 	}
 
-	data, errs, err := execengine.Execute(context.Background(), plan, nil, nil)
+	raw, errs, err := execute(context.Background(), plan, nil, nil, false)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -266,7 +265,10 @@ func TestEntities_ListParent(t *testing.T) {
 	}
 
 	// Verify entities merged at correct indices.
-	products, _ := data["products"].([]any)
+	var products []any
+	if err := json.Unmarshal(raw["products"], &products); err != nil {
+		t.Fatalf("unmarshal products: %v", err)
+	}
 	if len(products) != 3 {
 		t.Fatalf("expected 3 products, got %d", len(products))
 	}
@@ -275,6 +277,82 @@ func TestEntities_ListParent(t *testing.T) {
 		m, _ := item.(map[string]any)
 		if m["sku"] != wantSKUs[i] {
 			t.Errorf("product[%d].sku: got %v, want %q", i, m["sku"], wantSKUs[i])
+		}
+	}
+}
+
+// TestEntities_NestedObjectPath verifies entity merge through a multi-level path where
+// all intermediate levels are objects. The path ["user", "orders"] traverses a single
+// user object then the orders list within it. This exercises the multi-level path code
+// where intermediate json.RawMessage values must be decoded, modified, and re-encoded.
+func TestEntities_NestedObjectPath(t *testing.T) {
+	initData := map[string]any{
+		"user": map[string]any{
+			"orders": []any{
+				map[string]any{"id": "o1"},
+				map[string]any{"id": "o2"},
+			},
+		},
+	}
+	initSrv := httptest.NewServer(jsonResp(t, initData))
+	defer initSrv.Close()
+
+	entityResp := map[string]any{
+		"data": map[string]any{
+			"_entities": []any{
+				map[string]any{"total": 10},
+				map[string]any{"total": 20},
+			},
+		},
+	}
+	entitySrv, _ := captureRequest(t, mustMarshal(t, entityResp))
+	defer entitySrv.Close()
+
+	plan := &Plan{
+		Fetches: []Fetch{
+			{URL: initSrv.URL, Query: `{ user { orders { id } } }`},
+		},
+		EntityFetches: []EntityFetch{
+			{
+				URL:          entitySrv.URL,
+				TypeName:     "Order",
+				KeyFields:    []string{"id"},
+				Selection:    "total\n",
+				ParentPath:   []string{"user", "orders"},
+				IsParentList: true,
+			},
+		},
+		Projection: []*FieldProjection{
+			{Key: "user", Children: []*FieldProjection{
+				{Key: "orders", Children: []*FieldProjection{
+					{Key: "id"}, {Key: "total"},
+				}},
+			}},
+		},
+	}
+
+	raw, errs, err := execute(context.Background(), plan, nil, nil, false)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if len(errs) > 0 {
+		t.Fatalf("GraphQL errors: %v", errs)
+	}
+
+	var user map[string]any
+	if err := json.Unmarshal(raw["user"], &user); err != nil {
+		t.Fatalf("unmarshal user: %v", err)
+	}
+
+	orders, _ := user["orders"].([]any)
+	if len(orders) != 2 {
+		t.Fatalf("expected 2 orders, got %d", len(orders))
+	}
+	wantTotals := []float64{10, 20}
+	for i, item := range orders {
+		o, _ := item.(map[string]any)
+		if o["total"] != wantTotals[i] {
+			t.Errorf("orders[%d].total: got %v, want %v", i, o["total"], wantTotals[i])
 		}
 	}
 }

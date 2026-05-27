@@ -25,6 +25,8 @@ type urlSpecEntityFetch struct {
 	KeyFields      []string `json:"keyFields"`
 	RequiresFields []string `json:"requiresFields,omitempty"`
 	Selection      string   `json:"selection"`
+	Query          string   `json:"query,omitempty"`
+	Variables      []string `json:"variables,omitempty"`
 	ParentPath     []string `json:"parentPath"`
 	IsParentList   bool     `json:"isParentList,omitempty"`
 }
@@ -58,6 +60,8 @@ func MarshalURLPlanSpec(plan *federation.Plan) (string, error) {
 			KeyFields:      ef.KeyFields,
 			RequiresFields: ef.RequiresFields,
 			Selection:      ef.Selection,
+			Query:          ef.Query,
+			Variables:      ef.Variables,
 			ParentPath:     ef.ParentPath,
 			IsParentList:   ef.IsParentList,
 		})
@@ -81,6 +85,18 @@ func MarshalEnumPlanSpec(plan *federation.Plan) (string, error) {
 		return "", fmt.Errorf("generator: marshal enum plan spec: %w", err)
 	}
 	return string(b), nil
+}
+
+// decodePlanEntityFetches decodes the entityFetches portion of a plan spec JSON.
+// Returns nil if the spec has no entityFetches field.
+func decodePlanEntityFetches(specJSON string) ([]urlSpecEntityFetch, error) {
+	var doc struct {
+		EntityFetches []urlSpecEntityFetch `json:"entityFetches"`
+	}
+	if err := json.Unmarshal([]byte(specJSON), &doc); err != nil {
+		return nil, fmt.Errorf("generator: decode entity fetches: %w", err)
+	}
+	return doc.EntityFetches, nil
 }
 
 // WriteExecFile reads the embedded execengine source, replaces its package
