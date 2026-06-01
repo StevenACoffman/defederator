@@ -39,6 +39,7 @@ func extractQueriesFromGoFile(filename string) ([]embeddedQuery, error) {
 		if !ok || lit.Kind != goToken.STRING {
 			return true
 		}
+		fmt.Printf("Checking literal in %s\n", filename)
 		pos := fset.Position(lit.Pos())
 		value, err := strconv.Unquote(lit.Value)
 		if err != nil {
@@ -46,6 +47,7 @@ func extractQueriesFromGoFile(filename string) ([]embeddedQuery, error) {
 			return false
 		}
 		if strings.HasPrefix(strings.TrimSpace(value), "# @genqlient") {
+			fmt.Printf("Found query in %s\n", filename)
 			queries = append(queries, embeddedQuery{
 				text:   value,
 				source: fmt.Sprintf("%s:%d", pos.Filename, pos.Line),

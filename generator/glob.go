@@ -18,6 +18,7 @@ func expandGlobs(patterns []string, baseDir string) ([]string, error) {
 	var result []string
 
 	for _, pattern := range patterns {
+		fmt.Printf("Expanding pattern: %s (baseDir: %s)\n", pattern, baseDir)
 		if !filepath.IsAbs(pattern) {
 			pattern = filepath.Join(baseDir, pattern)
 		}
@@ -43,6 +44,7 @@ func expandGlobs(patterns []string, baseDir string) ([]string, error) {
 		}
 		for _, m := range matches {
 			abs := filepath.Join(base, m)
+			fmt.Printf("Matched: %s\n", abs)
 			if _, exists := seen[abs]; !exists {
 				seen[abs] = struct{}{}
 				result = append(result, abs)

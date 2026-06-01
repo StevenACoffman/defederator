@@ -24,6 +24,7 @@ import (
 
 // Generate runs the full defederator code-generation pipeline for cfg.
 func Generate(ctx context.Context, cfg *defConfig.Config) error {
+	fmt.Printf("Generating with config: %+v\n", cfg)
 	sdlPath := cfg.SchemaPath()
 	sdlBytes, err := os.ReadFile(sdlPath)
 	if err != nil {
@@ -70,7 +71,7 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	}
 	for name, def := range gqlgencCfg.GQLConfig.Schema.Types {
 		switch def.Kind {
-		case "ENUM", "INPUT_OBJECT":
+		case "INPUT_OBJECT": // We still map input objects to string for now?
 		default:
 			continue
 		}
@@ -150,6 +151,10 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	operations, err := source.Operations(operationQueryDocuments)
 	if err != nil {
 		return fmt.Errorf("generate: generate operations: %w", err)
+	}
+	fmt.Printf("Generated %d operations\n", len(operations))
+	for _, op := range operations {
+		fmt.Printf("Operation: %s\n", op.Name)
 	}
 
 	urlMode := cfg.URLMode
