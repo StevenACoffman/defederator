@@ -44,13 +44,22 @@ func TestDoGraphQLIntoMerged(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := tc.body
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(body))
-			}))
+			srv := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.Write([]byte(body))
+				}),
+			)
 			defer srv.Close()
 
-			data, errs, err := doGraphQLIntoMerged(context.Background(), http.DefaultClient, srv.URL, `{ q }`, "", nil)
+			data, errs, err := doGraphQLIntoMerged(
+				context.Background(),
+				http.DefaultClient,
+				srv.URL,
+				`{ q }`,
+				"",
+				nil,
+			)
 			if tc.wantError {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -113,14 +122,24 @@ func TestDoGraphQLInto(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := tc.body
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(body))
-			}))
+			srv := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.Write([]byte(body))
+				}),
+			)
 			defer srv.Close()
 
 			var dest product
-			errs, err := doGraphQLInto(context.Background(), http.DefaultClient, srv.URL, `{ p { id sku } }`, "", nil, &dest)
+			errs, err := doGraphQLInto(
+				context.Background(),
+				http.DefaultClient,
+				srv.URL,
+				`{ p { id sku } }`,
+				"",
+				nil,
+				&dest,
+			)
 			if tc.wantError {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -151,7 +170,15 @@ func TestDoGraphQLInto(t *testing.T) {
 		defer srv.Close()
 
 		var dest any
-		_, err := doGraphQLInto(context.Background(), http.DefaultClient, srv.URL, `{ p { id } }`, "", nil, &dest)
+		_, err := doGraphQLInto(
+			context.Background(),
+			http.DefaultClient,
+			srv.URL,
+			`{ p { id } }`,
+			"",
+			nil,
+			&dest,
+		)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -417,11 +444,11 @@ func TestApplyProjection_StripsExtraFields(t *testing.T) {
 // whitespace in input (which Go's json.Marshal never produces but HTTP servers can).
 func TestMergeRawObjects(t *testing.T) {
 	cases := map[string]struct {
-		dst          string
-		src          string
-		wantNil      bool
-		wantKeys     []string // keys that must be present after round-tripping through map
-		wantAbsent   []string // keys that must be absent
+		dst        string
+		src        string
+		wantNil    bool
+		wantKeys   []string // keys that must be present after round-tripping through map
+		wantAbsent []string // keys that must be absent
 	}{
 		"empty_dst_returns_src": {
 			dst:      `{}`,
@@ -501,14 +528,14 @@ func TestMergeRawObjects(t *testing.T) {
 
 func TestResolveURLSpec_RoundTrip(t *testing.T) {
 	cases := map[string]struct {
-		specJSON       string
-		wantFetchURL   string
-		wantQuery      string
-		wantVars       []string
-		wantEntityURL  string
-		wantTypeName   string
-		wantKeyFields  []string
-		wantProjKey    string
+		specJSON         string
+		wantFetchURL     string
+		wantQuery        string
+		wantVars         []string
+		wantEntityURL    string
+		wantTypeName     string
+		wantKeyFields    []string
+		wantProjKey      string
 		wantProjChildren int
 	}{
 		"fetch_only": {
@@ -553,8 +580,13 @@ func TestResolveURLSpec_RoundTrip(t *testing.T) {
 				t.Errorf("fetch query: got %q, want %q", plan.Fetches[0].Query, tc.wantQuery)
 			}
 			if tc.wantVars != nil {
-				if len(plan.Fetches[0].Variables) != len(tc.wantVars) || plan.Fetches[0].Variables[0] != tc.wantVars[0] {
-					t.Errorf("fetch variables: got %v, want %v", plan.Fetches[0].Variables, tc.wantVars)
+				if len(plan.Fetches[0].Variables) != len(tc.wantVars) ||
+					plan.Fetches[0].Variables[0] != tc.wantVars[0] {
+					t.Errorf(
+						"fetch variables: got %v, want %v",
+						plan.Fetches[0].Variables,
+						tc.wantVars,
+					)
 				}
 			}
 			if tc.wantEntityURL != "" {
@@ -568,7 +600,8 @@ func TestResolveURLSpec_RoundTrip(t *testing.T) {
 				if ef.TypeName != tc.wantTypeName {
 					t.Errorf("entity typeName: got %q, want %q", ef.TypeName, tc.wantTypeName)
 				}
-				if len(ef.KeyFields) != len(tc.wantKeyFields) || ef.KeyFields[0] != tc.wantKeyFields[0] {
+				if len(ef.KeyFields) != len(tc.wantKeyFields) ||
+					ef.KeyFields[0] != tc.wantKeyFields[0] {
 					t.Errorf("entity keyFields: got %v, want %v", ef.KeyFields, tc.wantKeyFields)
 				}
 			}
@@ -577,7 +610,11 @@ func TestResolveURLSpec_RoundTrip(t *testing.T) {
 					t.Errorf("projection key: got %v, want %q", plan.Projection, tc.wantProjKey)
 				}
 				if len(plan.Projection[0].Children) != tc.wantProjChildren {
-					t.Errorf("projection children: got %d, want %d", len(plan.Projection[0].Children), tc.wantProjChildren)
+					t.Errorf(
+						"projection children: got %d, want %d",
+						len(plan.Projection[0].Children),
+						tc.wantProjChildren,
+					)
 				}
 			}
 		})
@@ -665,10 +702,20 @@ func TestFilterVars_Subset(t *testing.T) {
 
 	plan := &Plan{
 		Fetches: []Fetch{
-			{URL: srv.URL, Query: `query($id: ID!) { p(id: $id) { id } }`, Variables: []string{"id"}},
+			{
+				URL:       srv.URL,
+				Query:     `query($id: ID!) { p(id: $id) { id } }`,
+				Variables: []string{"id"},
+			},
 		},
 	}
-	raw, _, err := execute(context.Background(), plan, map[string]any{"id": "x1", "extra": "y"}, nil, false)
+	raw, _, err := execute(
+		context.Background(),
+		plan,
+		map[string]any{"id": "x1", "extra": "y"},
+		nil,
+		false,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,7 +735,9 @@ func TestFilterVars_Subset(t *testing.T) {
 // handles subgraph responses with absent or null data without error.
 func TestExecuteAndUnmarshal_SingleFetch_EmptyData(t *testing.T) {
 	type result struct {
-		Product *struct{ ID string `json:"id"` } `json:"product"`
+		Product *struct {
+			ID string `json:"id"`
+		} `json:"product"`
 	}
 
 	cases := map[string]string{
@@ -702,10 +751,12 @@ func TestExecuteAndUnmarshal_SingleFetch_EmptyData(t *testing.T) {
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
 			body := body
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				w.Write([]byte(body))
-			}))
+			srv := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.Header().Set("Content-Type", "application/json")
+					w.Write([]byte(body))
+				}),
+			)
 			defer srv.Close()
 
 			plan := &Plan{
@@ -898,12 +949,14 @@ func TestProjection_Gating(t *testing.T) {
 	t.Run("ExecuteAndUnmarshal_typed_uses_skip", func(t *testing.T) {
 		// Entity server: returns empty _entities (entity fetch is a no-op here; we just
 		// need the slow path to be taken so execute() is called with skipProj=true).
-		entitySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
-			b, _ := json.Marshal(resp)
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(b)
-		}))
+		entitySrv := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
+				b, _ := json.Marshal(resp)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(b)
+			}),
+		)
 		defer entitySrv.Close()
 
 		type product struct {
@@ -937,12 +990,14 @@ func TestProjection_Gating(t *testing.T) {
 	// End-to-end: ExecuteAndUnmarshal sets skipProj=false for *map[string]any destinations,
 	// so projection runs and planner-added fields are stripped from the output map.
 	t.Run("ExecuteAndUnmarshal_untyped_applies_projection", func(t *testing.T) {
-		entitySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
-			b, _ := json.Marshal(resp)
-			w.Header().Set("Content-Type", "application/json")
-			w.Write(b)
-		}))
+		entitySrv := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
+				b, _ := json.Marshal(resp)
+				w.Header().Set("Content-Type", "application/json")
+				w.Write(b)
+			}),
+		)
 		defer entitySrv.Close()
 
 		plan := &Plan{
@@ -1026,7 +1081,9 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 				Ignored string `json:"-"`
 			}{},
 			validate: func(t *testing.T, dest any) {
-				d := dest.(*struct{ Ignored string `json:"-"` })
+				d := dest.(*struct {
+					Ignored string `json:"-"`
+				})
 				if d.Ignored != "" {
 					t.Errorf("field tagged json:\"-\" should not be set, got %q", d.Ignored)
 				}
@@ -1092,12 +1149,21 @@ func TestMarshalRawList(t *testing.T) {
 		input []json.RawMessage
 		want  string
 	}{
-		"empty":          {nil, "[]"},
-		"empty_slice":    {[]json.RawMessage{}, "[]"},
-		"single_object":  {[]json.RawMessage{json.RawMessage(`{"a":1}`)}, `[{"a":1}]`},
-		"two_objects":    {[]json.RawMessage{json.RawMessage(`{"a":1}`), json.RawMessage(`{"b":2}`)}, `[{"a":1},{"b":2}]`},
-		"null_element":   {[]json.RawMessage{json.RawMessage(`null`), json.RawMessage(`{"b":2}`)}, `[null,{"b":2}]`},
-		"string_element": {[]json.RawMessage{json.RawMessage(`"hello"`), json.RawMessage(`1`)}, `["hello",1]`},
+		"empty":         {nil, "[]"},
+		"empty_slice":   {[]json.RawMessage{}, "[]"},
+		"single_object": {[]json.RawMessage{json.RawMessage(`{"a":1}`)}, `[{"a":1}]`},
+		"two_objects": {
+			[]json.RawMessage{json.RawMessage(`{"a":1}`), json.RawMessage(`{"b":2}`)},
+			`[{"a":1},{"b":2}]`,
+		},
+		"null_element": {
+			[]json.RawMessage{json.RawMessage(`null`), json.RawMessage(`{"b":2}`)},
+			`[null,{"b":2}]`,
+		},
+		"string_element": {
+			[]json.RawMessage{json.RawMessage(`"hello"`), json.RawMessage(`1`)},
+			`["hello",1]`,
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1118,8 +1184,11 @@ func TestMarshalRawMerged(t *testing.T) {
 	}{
 		"empty":      {rawMerged{}, false},
 		"single_key": {rawMerged{"a": json.RawMessage(`1`)}, false},
-		"two_keys":   {rawMerged{"a": json.RawMessage(`1`), "b": json.RawMessage(`"hello"`)}, false},
-		"nested":     {rawMerged{"x": json.RawMessage(`{"y":2}`)}, false},
+		"two_keys": {
+			rawMerged{"a": json.RawMessage(`1`), "b": json.RawMessage(`"hello"`)},
+			false,
+		},
+		"nested": {rawMerged{"x": json.RawMessage(`{"y":2}`)}, false},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -1255,7 +1324,7 @@ func TestCollectLeavesRaw_IntermediateArray(t *testing.T) {
 		[]string{"districtById", "learningPathsTests", "courses", "course"},
 		"Course",
 		[]string{"contentId", "kaLocale"},
-		nil,  // requiresFields
+		nil,   // requiresFields
 		false, // isList: terminal is a single object per courses element
 	)
 	if err != nil {
@@ -1325,10 +1394,20 @@ func TestMergeEntityResults_IntermediateArray(t *testing.T) {
 				t.Fatal("more courses than expected")
 			}
 			if c.Course.ContentID != cases[idx].contentID {
-				t.Errorf("course[%d] contentID = %q, want %q", idx, c.Course.ContentID, cases[idx].contentID)
+				t.Errorf(
+					"course[%d] contentID = %q, want %q",
+					idx,
+					c.Course.ContentID,
+					cases[idx].contentID,
+				)
 			}
 			if c.Course.ID != cases[idx].wantID {
-				t.Errorf("course[%d] id = %q, want %q (entity not merged or wrong one merged)", idx, c.Course.ID, cases[idx].wantID)
+				t.Errorf(
+					"course[%d] id = %q, want %q (entity not merged or wrong one merged)",
+					idx,
+					c.Course.ID,
+					cases[idx].wantID,
+				)
 			}
 			idx++
 		}

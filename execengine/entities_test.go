@@ -7,20 +7,22 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
 )
 
 // captureRequest starts a server that saves the most recent request body and
 // returns response on every call. The returned getBody func returns the last
 // captured body. Callers own starting/stopping via defer srv.Close().
-func captureRequest(t *testing.T, response json.RawMessage) (srv *httptest.Server, getBody func() []byte) {
+func captureRequest(
+	t *testing.T,
+	response json.RawMessage,
+) (srv *httptest.Server, getBody func() []byte) {
 	t.Helper()
 	var last []byte
 	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		last = b
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(response)
+		_, _ = w.Write(response)
 	}))
 	return srv, func() []byte { return last }
 }
@@ -60,22 +62,22 @@ func TestEntities_Protocol(t *testing.T) {
 		entityResp json.RawMessage
 
 		// assertions on the captured _entities request
-		wantRepCount      int
-		wantRepTypeName   string
-		wantRepKeyField   string
-		wantRepKeyValue   any
-		wantRepReqField   string // requiresField that must appear in representation
-		wantRepReqValue   any
+		wantRepCount    int
+		wantRepTypeName string
+		wantRepKeyField string
+		wantRepKeyValue any
+		wantRepReqField string // requiresField that must appear in representation
+		wantRepReqValue any
 		// merged result assertion
 		wantMergedKey   string
 		wantMergedValue any
 	}{
 		"typename_always_present": {
-			parentObj:     map[string]any{"id": "p1"},
-			parentPathKey: "product",
-			typeName:      "Product",
-			keyFields:     []string{"id"},
-			entityResp:    entityResponse(map[string]any{"sku": "fed"}),
+			parentObj:       map[string]any{"id": "p1"},
+			parentPathKey:   "product",
+			typeName:        "Product",
+			keyFields:       []string{"id"},
+			entityResp:      entityResponse(map[string]any{"sku": "fed"}),
 			wantRepCount:    1,
 			wantRepTypeName: "Product",
 			wantRepKeyField: "id",
@@ -84,11 +86,11 @@ func TestEntities_Protocol(t *testing.T) {
 			wantMergedValue: "fed",
 		},
 		"key_fields_extracted": {
-			parentObj:     map[string]any{"id": "p2", "extraField": "ignored"},
-			parentPathKey: "product",
-			typeName:      "Product",
-			keyFields:     []string{"id"},
-			entityResp:    entityResponse(map[string]any{"name": "Apollo"}),
+			parentObj:       map[string]any{"id": "p2", "extraField": "ignored"},
+			parentPathKey:   "product",
+			typeName:        "Product",
+			keyFields:       []string{"id"},
+			entityResp:      entityResponse(map[string]any{"name": "Apollo"}),
 			wantRepCount:    1,
 			wantRepTypeName: "Product",
 			wantRepKeyField: "id",
@@ -97,12 +99,15 @@ func TestEntities_Protocol(t *testing.T) {
 			wantMergedValue: "Apollo",
 		},
 		"requires_fields_in_representation": {
-			parentObj:     map[string]any{"email": "user@example.com", "totalProductsCreated": float64(42)},
-			parentPathKey: "user",
-			typeName:      "User",
-			keyFields:     []string{"email"},
-			requiresFields: []string{"totalProductsCreated"},
-			entityResp:    entityResponse(map[string]any{"averagePerYear": float64(7)}),
+			parentObj: map[string]any{
+				"email":                "user@example.com",
+				"totalProductsCreated": float64(42),
+			},
+			parentPathKey:   "user",
+			typeName:        "User",
+			keyFields:       []string{"email"},
+			requiresFields:  []string{"totalProductsCreated"},
+			entityResp:      entityResponse(map[string]any{"averagePerYear": float64(7)}),
 			wantRepCount:    1,
 			wantRepTypeName: "User",
 			wantRepKeyField: "email",
@@ -126,7 +131,10 @@ func TestEntities_Protocol(t *testing.T) {
 
 			plan := &Plan{
 				Fetches: []Fetch{
-					{URL: initSrv.URL, Query: `{ result { id email totalProductsCreated extraField } }`},
+					{
+						URL:   initSrv.URL,
+						Query: `{ result { id email totalProductsCreated extraField } }`,
+					},
 				},
 				EntityFetches: []EntityFetch{
 					{
@@ -172,16 +180,28 @@ func TestEntities_Protocol(t *testing.T) {
 				t.Errorf("__typename: got %v, want %q", rep["__typename"], tc.wantRepTypeName)
 			}
 			if rep[tc.wantRepKeyField] != tc.wantRepKeyValue {
-				t.Errorf("key field %q: got %v, want %v", tc.wantRepKeyField, rep[tc.wantRepKeyField], tc.wantRepKeyValue)
+				t.Errorf(
+					"key field %q: got %v, want %v",
+					tc.wantRepKeyField,
+					rep[tc.wantRepKeyField],
+					tc.wantRepKeyValue,
+				)
 			}
 			if tc.wantRepReqField != "" {
 				if rep[tc.wantRepReqField] != tc.wantRepReqValue {
-					t.Errorf("requires field %q: got %v, want %v", tc.wantRepReqField, rep[tc.wantRepReqField], tc.wantRepReqValue)
+					t.Errorf(
+						"requires field %q: got %v, want %v",
+						tc.wantRepReqField,
+						rep[tc.wantRepReqField],
+						tc.wantRepReqValue,
+					)
 				}
 			}
 			// extraField must NOT appear in the representation (only key + requires fields).
 			if _, ok := rep["extraField"]; ok {
-				t.Error("extraField should not appear in representation — only key and requires fields allowed")
+				t.Error(
+					"extraField should not appear in representation — only key and requires fields allowed",
+				)
 			}
 		})
 	}

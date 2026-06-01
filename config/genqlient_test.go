@@ -20,7 +20,7 @@ bindings:
 `
 	tmp := t.TempDir()
 	cfgFile := filepath.Join(tmp, "genqlient.yaml")
-	if err := os.WriteFile(cfgFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -58,7 +58,11 @@ generated: client.go
 package: mypkg
 `
 	tmp := t.TempDir()
-	if err := os.WriteFile(filepath.Join(tmp, "genqlient.yaml"), []byte(content), 0644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(tmp, "genqlient.yaml"),
+		[]byte(content),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,10 +90,18 @@ operations: [gq_ops.graphql]
 generated: gq_client.go
 package: gqpkg
 `
-	if err := os.WriteFile(filepath.Join(tmp, ".defederator.yml"), []byte(defContent), 0644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(tmp, ".defederator.yml"),
+		[]byte(defContent),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tmp, "genqlient.yaml"), []byte(gqContent), 0644); err != nil {
+	if err := os.WriteFile(
+		filepath.Join(tmp, "genqlient.yaml"),
+		[]byte(gqContent),
+		0o644,
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -110,7 +122,7 @@ package: mypkg
 `
 	tmp := t.TempDir()
 	cfgFile := filepath.Join(tmp, "genqlient.yaml")
-	if err := os.WriteFile(cfgFile, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(cfgFile, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

@@ -33,8 +33,8 @@ type urlSpecEntityFetch struct {
 
 // urlSpecDoc is the top-level JSON object for a URL-keyed plan spec.
 type urlSpecDoc struct {
-	Fetches       []urlSpecFetch        `json:"fetches"`
-	EntityFetches []urlSpecEntityFetch  `json:"entityFetches,omitempty"`
+	Fetches       []urlSpecFetch                `json:"fetches"`
+	EntityFetches []urlSpecEntityFetch          `json:"entityFetches,omitempty"`
 	Projection    []*federation.FieldProjection `json:"projection,omitempty"`
 }
 
@@ -109,7 +109,7 @@ func WriteExecFile(outDir, pkg string) error {
 	// Strip the source.go embed directive line — it's in a separate file.
 	// (execengine.go does not contain any embed directives itself, so no-op.)
 	dest := filepath.Join(outDir, "federation_exec.go")
-	if err := os.WriteFile(dest, []byte(src), 0644); err != nil {
+	if err := os.WriteFile(dest, []byte(src), 0o644); err != nil {
 		return fmt.Errorf("generator: write federation_exec.go: %w", err)
 	}
 	return nil

@@ -7,14 +7,19 @@ import (
 	"path/filepath"
 	"testing"
 
-	defConfig "github.com/StevenACoffman/defederator/config"
 	"github.com/gqlgo/gqlgenc/clientgenv2"
+
+	defConfig "github.com/StevenACoffman/defederator/config"
 )
 
 func TestExportOperations_Unit(t *testing.T) {
 	ops := []*clientgenv2.Operation{
 		{Name: "GetUser", Operation: "query GetUser { id }", ResponseStructName: "GetUser"},
-		{Name: "ListProducts", Operation: "query ListProducts { products { id } }", ResponseStructName: "ListProducts"},
+		{
+			Name:               "ListProducts",
+			Operation:          "query ListProducts { products { id } }",
+			ResponseStructName: "ListProducts",
+		},
 	}
 	tmp := t.TempDir()
 	outFile := filepath.Join(tmp, "ops.json")
@@ -64,7 +69,15 @@ func TestExportOperations_EmptySlice(t *testing.T) {
 }
 
 func TestGenerate_ExportOperations(t *testing.T) {
-	supergraphRel := filepath.Join("..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql")
+	supergraphRel := filepath.Join(
+		"..",
+		"..",
+		"gorouter",
+		"federation",
+		"testdata",
+		"golden",
+		"supergraph.graphql",
+	)
 	supergraphPath, err := filepath.Abs(supergraphRel)
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +91,7 @@ func TestGenerate_ExportOperations(t *testing.T) {
 }`
 	tmp := t.TempDir()
 	queryFile := filepath.Join(tmp, "query.graphql")
-	if err := os.WriteFile(queryFile, []byte(query), 0644); err != nil {
+	if err := os.WriteFile(queryFile, []byte(query), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -86,8 +99,11 @@ func TestGenerate_ExportOperations(t *testing.T) {
 	cfg := &defConfig.Config{
 		Schema: supergraphPath,
 		Query:  []string{queryFile},
-		Client: defConfig.PackageConfig{Filename: filepath.Join(tmp, "client.go"), Package: "generated"},
-		Dir:    tmp,
+		Client: defConfig.PackageConfig{
+			Filename: filepath.Join(tmp, "client.go"),
+			Package:  "generated",
+		},
+		Dir: tmp,
 		Generate: &defConfig.GenerateConfig{
 			ExportOperations: exportFile,
 		},

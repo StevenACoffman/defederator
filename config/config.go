@@ -9,15 +9,26 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
+var (
+	defederatorFilenames = []string{".defederator.yml", "defederator.yml", "defederator.yaml"}
+	genqlientFilenames   = []string{
+		"genqlient.yaml",
+		"genqlient.yml",
+		".genqlient.yaml",
+		".genqlient.yml",
+	}
+)
+
+// defaultFilenames is searched in order; defederator files take precedence.
+var defaultFilenames = []string{
+	".defederator.yml", "defederator.yml", "defederator.yaml",
+	"genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml",
+}
+
 // PackageConfig specifies the output file and Go package name for generated code.
 type PackageConfig struct {
 	Filename string `yaml:"filename"`
 	Package  string `yaml:"package"`
-}
-
-// IsDefined returns true if both Filename and Package are set.
-func (p PackageConfig) IsDefined() bool {
-	return p.Filename != "" && p.Package != ""
 }
 
 // TypeBinding maps a GraphQL scalar name to a Go type with optional custom
@@ -77,13 +88,9 @@ type Config struct {
 	Dir string `yaml:"-"`
 }
 
-var defederatorFilenames = []string{".defederator.yml", "defederator.yml", "defederator.yaml"}
-var genqlientFilenames = []string{"genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml"}
-
-// defaultFilenames is searched in order; defederator files take precedence.
-var defaultFilenames = []string{
-	".defederator.yml", "defederator.yml", "defederator.yaml",
-	"genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml",
+// IsDefined returns true if both Filename and Package are set.
+func (p PackageConfig) IsDefined() bool {
+	return p.Filename != "" && p.Package != ""
 }
 
 // LoadConfig reads and parses a .defederator.yml file.

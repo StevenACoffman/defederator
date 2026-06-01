@@ -31,7 +31,7 @@ var alsoNotAQuery = ` + "`" + `query without annotation {}` + "`" + `
 
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, "ops.go")
-	if err := os.WriteFile(f, []byte(src), 0644); err != nil {
+	if err := os.WriteFile(f, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,7 +64,7 @@ func TestExtractQueriesFromGoFile_SourcePositions(t *testing.T) {
 
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, "ops.go")
-	if err := os.WriteFile(f, []byte(src), 0644); err != nil {
+	if err := os.WriteFile(f, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -89,7 +89,7 @@ const x = "query NoAnnotation { field }"
 `
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, "ops.go")
-	if err := os.WriteFile(f, []byte(src), 0644); err != nil {
+	if err := os.WriteFile(f, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -101,4 +101,3 @@ const x = "query NoAnnotation { field }"
 		t.Errorf("want 0 queries, got %d", len(queries))
 	}
 }
-

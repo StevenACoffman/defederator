@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Khan/genqlient/graphql"
+
 	"github.com/StevenACoffman/defederator/graphqlcompat"
 	"github.com/StevenACoffman/gorouter/federation"
 )

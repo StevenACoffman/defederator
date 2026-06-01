@@ -10,11 +10,13 @@ package graphqlcompat
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 
 	"github.com/Khan/genqlient/graphql"
+
 	"github.com/StevenACoffman/defederator/execengine"
 	"github.com/StevenACoffman/gorouter/federation"
 )
@@ -34,9 +36,13 @@ func NewClient(sg *federation.Supergraph, httpClient *http.Client) graphql.Clien
 	return &client{sg: sg, http: httpClient}
 }
 
-func (c *client) MakeRequest(ctx context.Context, req *graphql.Request, resp *graphql.Response) error {
+func (c *client) MakeRequest(
+	ctx context.Context,
+	req *graphql.Request,
+	resp *graphql.Response,
+) error {
 	if req.OpName == "" {
-		return fmt.Errorf("graphqlcompat: anonymous operations are not supported")
+		return errors.New("graphqlcompat: anonymous operations are not supported")
 	}
 
 	v, ok := c.planCache.Load(req.OpName)

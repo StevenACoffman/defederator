@@ -1,8 +1,10 @@
 package generator
 
 import (
+	"errors"
 	"fmt"
 	"go/types"
+	"strconv"
 	"strings"
 
 	"github.com/99designs/gqlgen/codegen/templates"
@@ -15,6 +17,13 @@ type chainStep struct {
 	IsPtr        bool // field type is a pointer — nil check before access
 	IsSlice      bool // field type is a slice — iteration for list entity fetches
 	SliceElemPtr bool // slice elements are pointers (only meaningful when IsSlice=true)
+}
+
+// keyFieldInfo holds the Go identifier and pointer-ness of one key or requires field
+// at the leaf element type reached by following parentPath through the response struct.
+type keyFieldInfo struct {
+	goName string
+	isPtr  bool
 }
 
 // parseJSONKey extracts the JSON field name from a struct tag string.
@@ -71,11 +80,20 @@ func walkTypeForChain(t types.Type, path []string) ([]chainStep, error) {
 	for segIdx, seg := range path {
 		st := unwrapToStruct(cur)
 		if st == nil {
-			return nil, fmt.Errorf("generator: expected struct at path segment %q (index %d), got %T", seg, segIdx, cur)
+			return nil, fmt.Errorf(
+				"generator: expected struct at path segment %q (index %d), got %T",
+				seg,
+				segIdx,
+				cur,
+			)
 		}
 		name, fieldType, ok := fieldByJSONKey(st, seg)
 		if !ok {
-			return nil, fmt.Errorf("generator: no field with json:%q in struct at path index %d", seg, segIdx)
+			return nil, fmt.Errorf(
+				"generator: no field with json:%q in struct at path index %d",
+				seg,
+				segIdx,
+			)
 		}
 		step := chainStep{GoName: name}
 		switch ft := fieldType.(type) {
@@ -123,29 +141,34 @@ func isFieldFromPriorEntityFetch(fieldName string, prior []urlSpecEntityFetch) b
 	return false
 }
 
-// keyFieldInfo holds the Go identifier and pointer-ness of one key or requires field
-// at the leaf element type reached by following parentPath through the response struct.
-type keyFieldInfo struct {
-	goName string
-	isPtr  bool
-}
-
 // leafKeyAccessors returns one keyFieldInfo per field name, looked up by JSON tag at
 // the element type reached by walking responseType along path. The walk advances through
 // pointer and slice layers so the returned infos describe fields on the slice-element
 // type (for list paths) or the pointed-to struct (for pointer paths).
 // Returns an error if any path segment or field name is absent, or if an intermediate
 // type is not a struct.
-func leafKeyAccessors(responseType types.Type, path []string, fields []string) ([]keyFieldInfo, error) {
+func leafKeyAccessors(
+	responseType types.Type,
+	path []string,
+	fields []string,
+) ([]keyFieldInfo, error) {
 	cur := responseType
 	for segIdx, seg := range path {
 		st := unwrapToStruct(cur)
 		if st == nil {
-			return nil, fmt.Errorf("generator: leafKeyAccessors: expected struct at path segment %q (index %d)", seg, segIdx)
+			return nil, fmt.Errorf(
+				"generator: leafKeyAccessors: expected struct at path segment %q (index %d)",
+				seg,
+				segIdx,
+			)
 		}
 		_, fieldType, ok := fieldByJSONKey(st, seg)
 		if !ok {
-			return nil, fmt.Errorf("generator: leafKeyAccessors: no field with json:%q at path index %d", seg, segIdx)
+			return nil, fmt.Errorf(
+				"generator: leafKeyAccessors: no field with json:%q at path index %d",
+				seg,
+				segIdx,
+			)
 		}
 		// Advance cur: unwrap pointer, then unwrap slice to element type.
 		if ptr, ok2 := fieldType.(*types.Pointer); ok2 {
@@ -162,13 +185,16 @@ func leafKeyAccessors(responseType types.Type, path []string, fields []string) (
 	}
 	st := unwrapToStruct(cur)
 	if st == nil {
-		return nil, fmt.Errorf("generator: leafKeyAccessors: leaf type is not a struct")
+		return nil, errors.New("generator: leafKeyAccessors: leaf type is not a struct")
 	}
 	result := make([]keyFieldInfo, len(fields))
 	for i, field := range fields {
 		name, fieldType, ok := fieldByJSONKey(st, field)
 		if !ok {
-			return nil, fmt.Errorf("generator: leafKeyAccessors: no field with json:%q in leaf struct", field)
+			return nil, fmt.Errorf(
+				"generator: leafKeyAccessors: no field with json:%q in leaf struct",
+				field,
+			)
 		}
 		_, isPtr := fieldType.(*types.Pointer)
 		result[i] = keyFieldInfo{goName: name, isPtr: isPtr}
@@ -227,7 +253,8 @@ func genAccessChain(steps []chainStep) string {
 // names to extract at the leaf struct.
 //
 // Example: path=["product"], steps=[{GoName:"Product",IsPtr:true}], keys=["id","dimensions"]
-// → `struct{ Product struct{ ID any \`json:"id"\`; Dimensions any \`json:"dimensions"\` } \`json:"product"\` }`
+// → `struct{ Product struct{ ID any \`json:"id"\`; Dimensions any \`json:"dimensions"\` }
+// \`json:"product"\` }`
 func genKeyExtractionStruct(path []string, steps []chainStep, keys []string) string {
 	var b strings.Builder
 	for i := range path {
@@ -407,7 +434,7 @@ func (g *genGettersGenerator) genSingleEntityFetch(
 	steps []chainStep,
 	keyInfos []keyFieldInfo,
 ) {
-	idxS := fmt.Sprintf("%d", idx)
+	idxS := strconv.Itoa(idx)
 	allKeys := append(append([]string{}, ef.KeyFields...), ef.RequiresFields...)
 	p := fmt.Sprintf("_ef%d", idx) // variable prefix for this entity fetch
 
@@ -428,17 +455,23 @@ func (g *genGettersGenerator) genSingleEntityFetch(
 		b.WriteString("for _i, _u := range " + keyAccess + " {\n")
 		if lastStep.SliceElemPtr {
 			b.WriteString("if _u == nil {\n")
-			b.WriteString("return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": nil element at index %d\", _i)\n")
+			b.WriteString(
+				"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": nil element at index %d\", _i)\n",
+			)
 			b.WriteString("}\n")
 		}
 		for ki, kf := range ef.KeyFields {
 			if keyInfos[ki].isPtr {
 				b.WriteString("if _u." + keyInfos[ki].goName + " == nil {\n")
-				b.WriteString("return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + kf + " nil at index %d\", _i)\n")
+				b.WriteString(
+					"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + kf + " nil at index %d\", _i)\n",
+				)
 				b.WriteString("}\n")
 			}
 		}
-		b.WriteString(p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"")
+		b.WriteString(
+			p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"",
+		)
 		for i, kf := range allKeys {
 			b.WriteString(", \"" + kf + "\": _u." + keyInfos[i].goName)
 		}
@@ -450,13 +483,25 @@ func (g *genGettersGenerator) genSingleEntityFetch(
 		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
-		b.WriteString("\"\", buildEntityFetchVars(" + p + "reps, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n")
-		b.WriteString("if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n")
-		b.WriteString("var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n")
-		b.WriteString("if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n")
-		b.WriteString("return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n")
+		b.WriteString(
+			"\"\", buildEntityFetchVars(" + p + "reps, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
+		)
+		b.WriteString(
+			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
+		)
+		b.WriteString(
+			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
+		)
+		b.WriteString(
+			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
+		)
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
+		)
 		b.WriteString("}\n")
-		b.WriteString("if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n")
+		b.WriteString(
+			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
+		)
 
 		// 4a. Merge into list. No inner nilGuard — already inside the outer one.
 		b.WriteString("for _i, _eraw := range " + p + "w.Data.Entities {\n")
@@ -464,11 +509,15 @@ func (g *genGettersGenerator) genSingleEntityFetch(
 		if lastStep.SliceElemPtr {
 			b.WriteString("if " + chain + "[_i] != nil {\n")
 			b.WriteString("if _merr := json.Unmarshal(_eraw, " + chain + "[_i]); _merr != nil {\n")
-			b.WriteString("return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n")
+			b.WriteString(
+				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
+			)
 			b.WriteString("}\n}\n")
 		} else {
 			b.WriteString("if _merr := json.Unmarshal(_eraw, &" + chain + "[_i]); _merr != nil {\n")
-			b.WriteString("return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n")
+			b.WriteString(
+				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
+			)
 			b.WriteString("}\n")
 		}
 		b.WriteString("}\n}\n") // end bounds check && entity loop
@@ -500,22 +549,40 @@ func (g *genGettersGenerator) genSingleEntityFetch(
 		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
-		b.WriteString("\"\", buildEntityFetchVars([]map[string]any{" + p + "rep}, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n")
-		b.WriteString("if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n")
-		b.WriteString("var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n")
-		b.WriteString("if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n")
-		b.WriteString("return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n")
+		b.WriteString(
+			"\"\", buildEntityFetchVars([]map[string]any{" + p + "rep}, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
+		)
+		b.WriteString(
+			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
+		)
+		b.WriteString(
+			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
+		)
+		b.WriteString(
+			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
+		)
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
+		)
 		b.WriteString("}\n")
-		b.WriteString("if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n")
+		b.WriteString(
+			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
+		)
 
 		// 4b. Merge into single parent. No inner nilGuard — already inside the outer one.
 		b.WriteString("if len(" + p + "w.Data.Entities) > 0 {\n")
 		if lastStep.IsPtr {
-			b.WriteString("if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n")
+			b.WriteString(
+				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n",
+			)
 		} else {
-			b.WriteString("if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n")
+			b.WriteString(
+				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n",
+			)
 		}
-		b.WriteString("return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n")
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n",
+		)
 		b.WriteString("}\n")
 		b.WriteString("}\n") // end if len(Entities) > 0
 
@@ -543,7 +610,7 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 	ef urlSpecEntityFetch,
 	steps []chainStep,
 ) {
-	idxS := fmt.Sprintf("%d", idx)
+	idxS := strconv.Itoa(idx)
 	allKeys := append(append([]string{}, ef.KeyFields...), ef.RequiresFields...)
 	p := fmt.Sprintf("_ef%d", idx)
 
@@ -555,9 +622,11 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 
 	// Leaf access path within keysVar: _ef0keys.Product (single) or _ef0keys.Products (list).
 	leafAccess := keysVar
+	var leafAccessSb558 strings.Builder
 	for _, s := range steps {
-		leafAccess += "." + s.GoName
+		leafAccessSb558.WriteString("." + s.GoName)
 	}
+	leafAccess += leafAccessSb558.String()
 
 	b.WriteString("{\n")
 	b.WriteString("var " + keysVar + " " + keyExtractType + "\n")
@@ -570,10 +639,14 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 		if len(ef.KeyFields) > 0 {
 			firstKey := ef.KeyFields[0]
 			b.WriteString("if _u." + title(firstKey) + " == nil {\n")
-			b.WriteString("return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + firstKey + " nil at index %d\", _i)\n")
+			b.WriteString(
+				"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + firstKey + " nil at index %d\", _i)\n",
+			)
 			b.WriteString("}\n")
 		}
-		b.WriteString(p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"")
+		b.WriteString(
+			p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"",
+		)
 		for _, kf := range allKeys {
 			b.WriteString(", \"" + kf + "\": _u." + title(kf))
 		}
@@ -585,13 +658,25 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
-		b.WriteString("\"\", buildEntityFetchVars(" + p + "reps, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n")
-		b.WriteString("if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n")
-		b.WriteString("var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n")
-		b.WriteString("if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n")
-		b.WriteString("return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n")
+		b.WriteString(
+			"\"\", buildEntityFetchVars(" + p + "reps, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
+		)
+		b.WriteString(
+			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
+		)
+		b.WriteString(
+			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
+		)
+		b.WriteString(
+			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
+		)
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
+		)
 		b.WriteString("}\n")
-		b.WriteString("if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n")
+		b.WriteString(
+			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
+		)
 
 		// 4a. Merge into list. Merge target is res.* (from genAccessChain), always present.
 		if nilGuard != "" {
@@ -602,11 +687,15 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 		if lastStep.SliceElemPtr {
 			b.WriteString("if " + chain + "[_i] != nil {\n")
 			b.WriteString("if _merr := json.Unmarshal(_eraw, " + chain + "[_i]); _merr != nil {\n")
-			b.WriteString("return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n")
+			b.WriteString(
+				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
+			)
 			b.WriteString("}\n}\n")
 		} else {
 			b.WriteString("if _merr := json.Unmarshal(_eraw, &" + chain + "[_i]); _merr != nil {\n")
-			b.WriteString("return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n")
+			b.WriteString(
+				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
+			)
 			b.WriteString("}\n")
 		}
 		b.WriteString("}\n}\n")
@@ -631,13 +720,25 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
 		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
-		b.WriteString("\"\", buildEntityFetchVars([]map[string]any{" + p + "rep}, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n")
-		b.WriteString("if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n")
-		b.WriteString("var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n")
-		b.WriteString("if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n")
-		b.WriteString("return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n")
+		b.WriteString(
+			"\"\", buildEntityFetchVars([]map[string]any{" + p + "rep}, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
+		)
+		b.WriteString(
+			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
+		)
+		b.WriteString(
+			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
+		)
+		b.WriteString(
+			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
+		)
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
+		)
 		b.WriteString("}\n")
-		b.WriteString("if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n")
+		b.WriteString(
+			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
+		)
 
 		// 4b. Merge into single parent. nilGuard protects intermediate pointer steps.
 		b.WriteString("if len(" + p + "w.Data.Entities) > 0 {\n")
@@ -645,11 +746,17 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 			b.WriteString("if " + nilGuard + " {\n")
 		}
 		if lastStep.IsPtr {
-			b.WriteString("if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n")
+			b.WriteString(
+				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n",
+			)
 		} else {
-			b.WriteString("if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n")
+			b.WriteString(
+				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n",
+			)
 		}
-		b.WriteString("return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n")
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n",
+		)
 		b.WriteString("}\n")
 		if nilGuard != "" {
 			b.WriteString("}\n")
@@ -683,4 +790,3 @@ func (g *genGettersGenerator) genEntityFetchFunc(
 		return g.genEntityFetch(op.Name, respType, templates.ToGo(op.ResponseStructName), specJSON)
 	}
 }
-

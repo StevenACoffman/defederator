@@ -10,10 +10,10 @@ import (
 
 // genqlientConfig matches the subset of genqlient.yaml fields that defederator needs.
 type genqlientConfig struct {
-	Schema     stringOrList     `yaml:"schema"`
-	Operations []string         `yaml:"operations"`
-	Generated  string           `yaml:"generated"`
-	Package    string           `yaml:"package"`
+	Schema     stringOrList           `yaml:"schema"`
+	Operations []string               `yaml:"operations"`
+	Generated  string                 `yaml:"generated"`
+	Package    string                 `yaml:"package"`
 	Bindings   map[string]TypeBinding `yaml:"bindings,omitempty"`
 }
 

@@ -10,7 +10,7 @@ import (
 func TestExpandGlobs_ExactPath(t *testing.T) {
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, "query.graphql")
-	if err := os.WriteFile(f, []byte("query {}"), 0644); err != nil {
+	if err := os.WriteFile(f, []byte("query {}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -26,7 +26,7 @@ func TestExpandGlobs_ExactPath(t *testing.T) {
 func TestExpandGlobs_SingleStar(t *testing.T) {
 	tmp := t.TempDir()
 	for _, name := range []string{"a.graphql", "b.graphql", "c.go"} {
-		if err := os.WriteFile(filepath.Join(tmp, name), []byte(""), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(tmp, name), []byte(""), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -53,11 +53,11 @@ func TestExpandGlobs_SingleStar(t *testing.T) {
 func TestExpandGlobs_DoubleStar(t *testing.T) {
 	tmp := t.TempDir()
 	sub := filepath.Join(tmp, "sub")
-	if err := os.MkdirAll(sub, 0755); err != nil {
+	if err := os.MkdirAll(sub, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{filepath.Join(tmp, "a.graphql"), filepath.Join(sub, "b.graphql")} {
-		if err := os.WriteFile(name, []byte(""), 0644); err != nil {
+		if err := os.WriteFile(name, []byte(""), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -82,7 +82,7 @@ func TestExpandGlobs_EmptyGlobErrors(t *testing.T) {
 func TestExpandGlobs_Dedup(t *testing.T) {
 	tmp := t.TempDir()
 	f := filepath.Join(tmp, "q.graphql")
-	if err := os.WriteFile(f, []byte(""), 0644); err != nil {
+	if err := os.WriteFile(f, []byte(""), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

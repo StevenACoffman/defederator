@@ -156,7 +156,15 @@ var perCaseChecks = map[string]struct {
 // fixture queries, verifies the output is syntactically valid Go, and checks that
 // each file contains the expected function signatures, type names, and imports.
 func TestCodegenCompile(t *testing.T) {
-	supergraphRel := filepath.Join("..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql")
+	supergraphRel := filepath.Join(
+		"..",
+		"..",
+		"gorouter",
+		"federation",
+		"testdata",
+		"golden",
+		"supergraph.graphql",
+	)
 	supergraphPath, err := filepath.Abs(supergraphRel)
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +186,15 @@ func TestCodegenCompile(t *testing.T) {
 // TestCodegenCompileOptional verifies that optional: value strips pointer types
 // for nullable fields and optional: pointer (explicit) preserves them.
 func TestCodegenCompileOptional(t *testing.T) {
-	supergraphRel := filepath.Join("..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql")
+	supergraphRel := filepath.Join(
+		"..",
+		"..",
+		"gorouter",
+		"federation",
+		"testdata",
+		"golden",
+		"supergraph.graphql",
+	)
 	supergraphPath, err := filepath.Abs(supergraphRel)
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +237,7 @@ func runCodegenWithOptional(t *testing.T, supergraphPath, query, optional string
 	t.Helper()
 	tmpDir := t.TempDir()
 	queryFile := filepath.Join(tmpDir, "query.graphql")
-	if err := os.WriteFile(queryFile, []byte(query), 0644); err != nil {
+	if err := os.WriteFile(queryFile, []byte(query), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	outFile := filepath.Join(tmpDir, "client.go")
@@ -252,7 +268,7 @@ func runCodegenCompileCase(t *testing.T, supergraphPath, fixtureName, query stri
 
 	// Write the named query to a temp file.
 	queryFile := filepath.Join(tmpDir, "query.graphql")
-	if err := os.WriteFile(queryFile, []byte(query), 0644); err != nil {
+	if err := os.WriteFile(queryFile, []byte(query), 0o644); err != nil {
 		t.Fatalf("write query file: %v", err)
 	}
 

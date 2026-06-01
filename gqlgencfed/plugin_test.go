@@ -9,17 +9,24 @@ import (
 
 	"github.com/99designs/gqlgen/api"
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
-	gqlgencGenerator "github.com/gqlgo/gqlgenc/generator"
 	gqlgencConfig "github.com/gqlgo/gqlgenc/config"
+	gqlgencGenerator "github.com/gqlgo/gqlgenc/generator"
+	"github.com/vektah/gqlparser/v2/ast"
 
 	"github.com/StevenACoffman/defederator/generator"
 	"github.com/StevenACoffman/defederator/gqlgencfed"
-
-	"github.com/vektah/gqlparser/v2/ast"
 )
 
 func TestPluginViaGenerateGenerate(t *testing.T) {
-	supergraphRel := filepath.Join("..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql")
+	supergraphRel := filepath.Join(
+		"..",
+		"..",
+		"gorouter",
+		"federation",
+		"testdata",
+		"golden",
+		"supergraph.graphql",
+	)
 	supergraphPath, err := filepath.Abs(supergraphRel)
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +53,7 @@ query GetProduct($id: ID!) {
     sku
   }
 }
-`), 0644); err2 != nil {
+`), 0o644); err2 != nil {
 		t.Fatal(err2)
 	}
 
@@ -74,7 +81,14 @@ query GetProduct($id: ID!) {
 	err = gqlgencGenerator.Generate(
 		context.Background(),
 		gqlgencCfg,
-		api.ReplacePlugin(gqlgencfed.NewWithFilePaths([]string{queryFile}, clientPkg, generateCfg, string(sdlBytes))),
+		api.ReplacePlugin(
+			gqlgencfed.NewWithFilePaths(
+				[]string{queryFile},
+				clientPkg,
+				generateCfg,
+				string(sdlBytes),
+			),
+		),
 	)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)

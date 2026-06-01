@@ -16,7 +16,15 @@ import (
 // that embeds a # @genqlient query. The generated output should be identical in
 // structure to the equivalent .graphql variant.
 func TestCodegenFromGoFile(t *testing.T) {
-	supergraphRel := filepath.Join("..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql")
+	supergraphRel := filepath.Join(
+		"..",
+		"..",
+		"gorouter",
+		"federation",
+		"testdata",
+		"golden",
+		"supergraph.graphql",
+	)
 	supergraphPath, err := filepath.Abs(supergraphRel)
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +46,7 @@ query GetProductIdSku {
 
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "ops.go")
-	if err := os.WriteFile(goFile, []byte(goSrc), 0644); err != nil {
+	if err := os.WriteFile(goFile, []byte(goSrc), 0o644); err != nil {
 		t.Fatalf("write go file: %v", err)
 	}
 

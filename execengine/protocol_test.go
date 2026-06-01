@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
 )
 
 // TestExecute_ProtocolEdgeCases verifies Layer 1: the executor handles all legal
@@ -115,7 +114,12 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 				t.Fatalf("unexpected transport error: %v", err)
 			}
 			if len(errs) != tc.wantErrCount {
-				t.Errorf("GraphQL error count: got %d, want %d (errs=%v)", len(errs), tc.wantErrCount, errs)
+				t.Errorf(
+					"GraphQL error count: got %d, want %d (errs=%v)",
+					len(errs),
+					tc.wantErrCount,
+					errs,
+				)
 			}
 		})
 	}

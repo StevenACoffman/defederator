@@ -4,7 +4,10 @@
 // Usage with the modified gqlgenc generator.Generate:
 //
 //	err = generator.Generate(ctx, cfg,
-//	    api.ReplacePlugin(gqlgencfed.New(queryDoc, opDocs, cfg.Client, cfg.Generate, supergraphSDL)),
+//	    api.ReplacePlugin(gqlgencfed.New(queryDoc, opDocs, cfg.Client, cfg.Generate,
+//
+// supergraphSDL)),
+//
 //	)
 package gqlgencfed
 
@@ -14,16 +17,14 @@ import (
 
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
 	"github.com/99designs/gqlgen/plugin"
-
 	"github.com/gqlgo/gqlgenc/clientgenv2"
 	gqlgencConfig "github.com/gqlgo/gqlgenc/config"
 	"github.com/gqlgo/gqlgenc/parsequery"
 	"github.com/gqlgo/gqlgenc/querydocument"
+	"github.com/vektah/gqlparser/v2/ast"
 
 	"github.com/StevenACoffman/defederator/generator"
 	"github.com/StevenACoffman/gorouter/federation"
-
-	"github.com/vektah/gqlparser/v2/ast"
 )
 
 var _ plugin.ConfigMutator = &Plugin{}
@@ -104,7 +105,10 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 	operationQueryDocuments := p.operationQueryDocuments
 	if operationQueryDocuments == nil {
 		var err error
-		operationQueryDocuments, err = querydocument.QueryDocumentsByOperations(cfg.Schema, queryDocument.Operations)
+		operationQueryDocuments, err = querydocument.QueryDocumentsByOperations(
+			cfg.Schema,
+			queryDocument.Operations,
+		)
 		if err != nil {
 			return fmt.Errorf("gqlgencfed: build per-operation documents: %w", err)
 		}
@@ -160,7 +164,10 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		return fmt.Errorf("gqlgencfed: render template: %w", err)
 	}
 
-	if err := generator.WriteExecFile(filepath.Dir(p.client.Filename), p.client.Package); err != nil {
+	if err := generator.WriteExecFile(
+		filepath.Dir(p.client.Filename),
+		p.client.Package,
+	); err != nil {
 		return fmt.Errorf("gqlgencfed: write exec file: %w", err)
 	}
 

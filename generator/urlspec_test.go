@@ -82,7 +82,11 @@ func TestMarshalURLPlanSpec_RoundTrip(t *testing.T) {
 				t.Error("specJSON contains 'subgraphEnum'; expected URL-keyed format")
 			}
 			if !strings.Contains(specJSON, tc.wantFetchURLPart) {
-				t.Errorf("specJSON missing expected URL part %q:\n%s", tc.wantFetchURLPart, specJSON)
+				t.Errorf(
+					"specJSON missing expected URL part %q:\n%s",
+					tc.wantFetchURLPart,
+					specJSON,
+				)
 			}
 
 			// Round-trip: ResolveURLSpec must decode back to a valid Plan.

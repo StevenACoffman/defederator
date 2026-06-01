@@ -43,36 +43,6 @@ type EntityFetch struct {
 	IsParentList   bool
 }
 
-// entityQuery returns the complete entity query string to send to the subgraph.
-// If Query is set (built at plan time with all variable declarations), it is returned directly.
-// Otherwise falls back to building the query from Selection at runtime for backward compat.
-func (ef *EntityFetch) entityQuery() string {
-	if ef.Query != "" {
-		return ef.Query
-	}
-	return buildEntityQuery(ef.TypeName, ef.Selection)
-}
-
-// buildEntityFetchVars merges entity representations with any operation variables
-// the entity fetch selection references. opVars must be map[string]any;
-// struct-typed vars cannot be subset-extracted.
-func buildEntityFetchVars(reps any, opVars any, varNames []string) map[string]any {
-	m := map[string]any{"representations": reps}
-	if len(varNames) == 0 {
-		return m
-	}
-	opMap, ok := opVars.(map[string]any)
-	if !ok {
-		return m
-	}
-	for _, name := range varNames {
-		if v, ok := opMap[name]; ok {
-			m[name] = v
-		}
-	}
-	return m
-}
-
 // FieldProjection is a node in the user-requested selection tree. Used to strip
 // planner-added fields (key fields, __typename, @requires pre-fetch fields) from
 // the final merged response.
@@ -133,6 +103,56 @@ type urlEntityFetch struct {
 	IsParentList   bool     `json:"isParentList,omitempty"`
 }
 
+// GraphQLError is a single error object in a GraphQL response.
+type GraphQLError struct {
+	Message    string           `json:"message"`
+	Locations  []map[string]int `json:"locations,omitempty"`
+	Path       []any            `json:"path,omitempty"`
+	Extensions map[string]any   `json:"extensions,omitempty"`
+}
+
+// graphqlRequest is the JSON body sent to a subgraph.
+type graphqlRequest struct {
+	Query         string `json:"query"`
+	OperationName string `json:"operationName,omitempty"`
+	Variables     any    `json:"variables,omitempty"`
+}
+
+// rawMerged is the internal accumulator type: top-level field name → raw JSON bytes.
+// Values are kept as json.RawMessage until final serialization to avoid
+// interface{} boxing and intermediate allocations.
+type rawMerged = map[string]json.RawMessage
+
+// entityQuery returns the complete entity query string to send to the subgraph.
+// If Query is set (built at plan time with all variable declarations), it is returned directly.
+// Otherwise falls back to building the query from Selection at runtime for backward compat.
+func (ef *EntityFetch) entityQuery() string {
+	if ef.Query != "" {
+		return ef.Query
+	}
+	return buildEntityQuery(ef.TypeName, ef.Selection)
+}
+
+// buildEntityFetchVars merges entity representations with any operation variables
+// the entity fetch selection references. opVars must be map[string]any;
+// struct-typed vars cannot be subset-extracted.
+func buildEntityFetchVars(reps any, opVars any, varNames []string) map[string]any {
+	m := map[string]any{"representations": reps}
+	if len(varNames) == 0 {
+		return m
+	}
+	opMap, ok := opVars.(map[string]any)
+	if !ok {
+		return m
+	}
+	for _, name := range varNames {
+		if v, ok := opMap[name]; ok {
+			m[name] = v
+		}
+	}
+	return m
+}
+
 // Resolve decodes a JSON-encoded plan spec and returns a Plan with subgraph enum names
 // substituted by their URLs from urls. Returns an error if any enum name is absent from urls.
 func Resolve(specJSON string, urls map[string]string) (*Plan, error) {
@@ -189,24 +209,10 @@ func ResolveURLSpec(specJSON string) (*Plan, error) {
 		Projection:    raw.Projection,
 	}
 	for _, f := range raw.Fetches {
-		plan.Fetches = append(plan.Fetches, Fetch{
-			URL:       f.URL,
-			Query:     f.Query,
-			Variables: f.Variables,
-		})
+		plan.Fetches = append(plan.Fetches, Fetch(f))
 	}
 	for _, ef := range raw.EntityFetches {
-		plan.EntityFetches = append(plan.EntityFetches, EntityFetch{
-			URL:            ef.URL,
-			TypeName:       ef.TypeName,
-			KeyFields:      ef.KeyFields,
-			RequiresFields: ef.RequiresFields,
-			Selection:      ef.Selection,
-			Query:          ef.Query,
-			Variables:      ef.Variables,
-			ParentPath:     ef.ParentPath,
-			IsParentList:   ef.IsParentList,
-		})
+		plan.EntityFetches = append(plan.EntityFetches, EntityFetch(ef))
 	}
 	return plan, nil
 }
@@ -216,7 +222,13 @@ func ResolveURLSpec(specJSON string) (*Plan, error) {
 // Fast path: when the plan has exactly one fetch and no entity fetches,
 // the subgraph response is unmarshaled directly into dest — no intermediate
 // map[string]any allocation or re-marshal step.
-func ExecuteAndUnmarshal(ctx context.Context, plan *Plan, vars any, client *http.Client, dest any) error {
+func ExecuteAndUnmarshal(
+	ctx context.Context,
+	plan *Plan,
+	vars any,
+	client *http.Client,
+	dest any,
+) error {
 	if client == nil {
 		client = http.DefaultClient
 	}
@@ -234,7 +246,15 @@ func ExecuteAndUnmarshal(ctx context.Context, plan *Plan, vars any, client *http
 	// decode target — no intermediate json.RawMessage allocation or second Unmarshal.
 	if len(plan.Fetches) == 1 && len(plan.EntityFetches) == 0 {
 		f := plan.Fetches[0]
-		errs, err := doGraphQLInto(ctx, client, f.URL, f.Query, "", filterVars(vars, f.Variables), dest)
+		errs, err := doGraphQLInto(
+			ctx,
+			client,
+			f.URL,
+			f.Query,
+			"",
+			filterVars(vars, f.Variables),
+			dest,
+		)
 		if err != nil {
 			return fmt.Errorf("execengine: fetch %s: %w", f.URL, err)
 		}
@@ -254,27 +274,7 @@ func ExecuteAndUnmarshal(ctx context.Context, plan *Plan, vars any, client *http
 	return unmarshalRawMergedInto(merged, dest)
 }
 
-// GraphQLError is a single error object in a GraphQL response.
-type GraphQLError struct {
-	Message    string                 `json:"message"`
-	Locations  []map[string]int       `json:"locations,omitempty"`
-	Path       []any                  `json:"path,omitempty"`
-	Extensions map[string]any         `json:"extensions,omitempty"`
-}
-
 func (e GraphQLError) Error() string { return e.Message }
-
-// graphqlRequest is the JSON body sent to a subgraph.
-type graphqlRequest struct {
-	Query         string `json:"query"`
-	OperationName string `json:"operationName,omitempty"`
-	Variables     any    `json:"variables,omitempty"`
-}
-
-// rawMerged is the internal accumulator type: top-level field name → raw JSON bytes.
-// Values are kept as json.RawMessage until final serialization to avoid
-// interface{} boxing and intermediate allocations.
-type rawMerged = map[string]json.RawMessage
 
 // execute runs plan against real HTTP subgraph endpoints.
 // Initial fetches run in parallel (or inline for a single fetch); entity fetches
@@ -300,7 +300,14 @@ func execute(
 	if len(plan.Fetches) == 1 {
 		// Single initial fetch: inline call avoids goroutine and WaitGroup overhead.
 		f := plan.Fetches[0]
-		data, errs, err := doGraphQLIntoMerged(ctx, client, f.URL, f.Query, "", filterVars(variables, f.Variables))
+		data, errs, err := doGraphQLIntoMerged(
+			ctx,
+			client,
+			f.URL,
+			f.Query,
+			"",
+			filterVars(variables, f.Variables),
+		)
 		if err != nil {
 			return nil, nil, fmt.Errorf("execengine: fetch %s: %w", f.URL, err)
 		}
@@ -321,9 +328,18 @@ func execute(
 			wg.Add(1)
 			go func(i int, fetch Fetch) {
 				defer wg.Done()
-				data, errs, err := doGraphQLIntoMerged(ctx, client, fetch.URL, fetch.Query, "", filterVars(variables, fetch.Variables))
+				data, errs, err := doGraphQLIntoMerged(
+					ctx,
+					client,
+					fetch.URL,
+					fetch.Query,
+					"",
+					filterVars(variables, fetch.Variables),
+				)
 				if err != nil {
-					results[i] = fetchResult{err: fmt.Errorf("execengine: fetch %s: %w", fetch.URL, err)}
+					results[i] = fetchResult{
+						err: fmt.Errorf("execengine: fetch %s: %w", fetch.URL, err),
+					}
 					return
 				}
 				results[i] = fetchResult{data: data, errors: errs}
@@ -343,7 +359,14 @@ func execute(
 	}
 
 	for _, ef := range plan.EntityFetches {
-		reps, err := collectRepresentations(merged, ef.ParentPath, ef.TypeName, ef.KeyFields, ef.RequiresFields, ef.IsParentList)
+		reps, err := collectRepresentations(
+			merged,
+			ef.ParentPath,
+			ef.TypeName,
+			ef.KeyFields,
+			ef.RequiresFields,
+			ef.IsParentList,
+		)
 		if err != nil {
 			allErrors = append(allErrors, GraphQLError{
 				Message: fmt.Sprintf("execengine: entity fetch for %s: %s", ef.TypeName, err),
@@ -361,7 +384,12 @@ func execute(
 		entityRaw, err := httpPost(ctx, client, ef.URL, entityQuery, "", entityVars)
 		if err != nil {
 			allErrors = append(allErrors, GraphQLError{
-				Message: fmt.Sprintf("execengine: entity fetch %s/%s: %s", ef.URL, ef.TypeName, err),
+				Message: fmt.Sprintf(
+					"execengine: entity fetch %s/%s: %s",
+					ef.URL,
+					ef.TypeName,
+					err,
+				),
 			})
 			continue
 		}
@@ -373,7 +401,12 @@ func execute(
 		}
 		if err := json.Unmarshal(entityRaw, &entityWrapper); err != nil {
 			allErrors = append(allErrors, GraphQLError{
-				Message: fmt.Sprintf("execengine: decode entity response %s/%s: %s", ef.URL, ef.TypeName, err),
+				Message: fmt.Sprintf(
+					"execengine: decode entity response %s/%s: %s",
+					ef.URL,
+					ef.TypeName,
+					err,
+				),
 			})
 			continue
 		}
@@ -394,6 +427,8 @@ func execute(
 // applyProjection trims data to only the fields in proj, discarding planner-added fields.
 // Values for fields with children are decoded and recursively filtered; leaf values are
 // kept as raw bytes.
+//
+//nolint:revive // cognitive complexity is inherent in recursive JSON projection
 func applyProjection(data rawMerged, proj []*FieldProjection) (rawMerged, error) {
 	if len(proj) == 0 {
 		return data, nil
@@ -457,7 +492,12 @@ func applyProjection(data rawMerged, proj []*FieldProjection) (rawMerged, error)
 }
 
 // httpPost marshals a GraphQL request, POSTs it to url, and returns the raw response body.
-func httpPost(ctx context.Context, client *http.Client, url, query, operationName string, variables any) ([]byte, error) {
+func httpPost(
+	ctx context.Context,
+	client *http.Client,
+	url, query, operationName string,
+	variables any,
+) ([]byte, error) {
 	body, err := json.Marshal(graphqlRequest{
 		Query:         query,
 		OperationName: operationName,
@@ -489,7 +529,12 @@ func httpPost(ctx context.Context, client *http.Client, url, query, operationNam
 // doGraphQLIntoMerged sends a GraphQL POST and decodes the response wrapper and data
 // field in one pass, populating a rawMerged map directly. This avoids the two-step
 // pattern of decoding data into json.RawMessage first and then into rawMerged.
-func doGraphQLIntoMerged(ctx context.Context, client *http.Client, url, query, operationName string, variables any) (rawMerged, []GraphQLError, error) {
+func doGraphQLIntoMerged(
+	ctx context.Context,
+	client *http.Client,
+	url, query, operationName string,
+	variables any,
+) (rawMerged, []GraphQLError, error) {
 	raw, err := httpPost(ctx, client, url, query, operationName, variables)
 	if err != nil {
 		return nil, nil, err
@@ -509,7 +554,12 @@ func doGraphQLIntoMerged(ctx context.Context, client *http.Client, url, query, o
 // non-nil pointer, encoding/json's indirect() follows the interface to the concrete type
 // and populates it directly — eliminating the intermediate json.RawMessage allocation
 // and the second Unmarshal call that doGraphQL+Unmarshal would require.
-func doGraphQLInto(ctx context.Context, client *http.Client, url, query, operationName string, variables, dest any) ([]GraphQLError, error) {
+func doGraphQLInto(
+	ctx context.Context,
+	client *http.Client,
+	url, query, operationName string,
+	variables, dest any,
+) ([]GraphQLError, error) {
 	raw, err := httpPost(ctx, client, url, query, operationName, variables)
 	if err != nil {
 		return nil, err
@@ -579,6 +629,8 @@ func collectRepresentations(
 // collectLeavesRaw traverses raw JSON following path, fanning out through any JSON arrays
 // encountered at intermediate steps. Returns leaf values in traversal order.
 // When isList is true the terminal JSON value is itself unwrapped as an array.
+//
+//nolint:revive // cognitive complexity is inherent in recursive JSON traversal
 func collectLeavesRaw(raw json.RawMessage, path []string, isList bool) ([]json.RawMessage, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -624,7 +676,11 @@ func collectLeavesRaw(raw json.RawMessage, path []string, isList bool) ([]json.R
 
 // buildRepresentation constructs a single entity representation from an object's raw fields.
 // typeNameJSON is the pre-encoded JSON string for __typename.
-func buildRepresentation(obj rawMerged, typeNameJSON json.RawMessage, keyFields, requiresFields []string) (map[string]json.RawMessage, error) {
+func buildRepresentation(
+	obj rawMerged,
+	typeNameJSON json.RawMessage,
+	keyFields, requiresFields []string,
+) (map[string]json.RawMessage, error) {
 	rep := make(map[string]json.RawMessage, 1+len(keyFields)+len(requiresFields))
 	rep["__typename"] = typeNameJSON
 	for _, kf := range keyFields {
@@ -648,7 +704,14 @@ func buildRepresentation(obj rawMerged, typeNameJSON json.RawMessage, keyFields,
 // consuming entities in traversal order (same order collectRepresentations produced them).
 // Returns the unconsumed tail of entities — callers that don't need the remainder
 // may ignore the return value.
-func mergeEntityResults(data rawMerged, path []string, entities []json.RawMessage, isList bool) []json.RawMessage {
+//
+//nolint:revive // cognitive complexity is inherent in recursive merge with array fan-out
+func mergeEntityResults(
+	data rawMerged,
+	path []string,
+	entities []json.RawMessage,
+	isList bool,
+) []json.RawMessage {
 	if len(path) == 0 || len(entities) == 0 {
 		return entities
 	}
@@ -805,7 +868,6 @@ func marshalRawMerged(m rawMerged) ([]byte, error) {
 	return out, nil
 }
 
-
 // unmarshalRawMergedInto populates dest from merged without marshaling the whole map
 // to intermediate bytes. For struct destinations it iterates top-level fields and
 // calls json.Unmarshal on each field's raw bytes directly. For *any and *map[string]any
@@ -813,7 +875,7 @@ func marshalRawMerged(m rawMerged) ([]byte, error) {
 // marshal+unmarshal round-trip to ensure correctness.
 func unmarshalRawMergedInto(merged rawMerged, dest any) error {
 	v := reflect.ValueOf(dest)
-	if v.Kind() != reflect.Ptr || v.IsNil() {
+	if v.Kind() != reflect.Pointer || v.IsNil() {
 		return marshalFallback(merged, dest)
 	}
 	elem := v.Elem()

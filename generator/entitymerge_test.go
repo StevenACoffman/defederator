@@ -7,6 +7,11 @@ import (
 	"testing"
 )
 
+var (
+	strType = types.Typ[types.String]
+	intType = types.Typ[types.Int]
+)
+
 // makeField builds a types.Var with the given name, type, and json struct tag.
 func makeField(name string, typ types.Type, jsonKey string) (*types.Var, string) {
 	v := types.NewField(token.NoPos, nil, name, typ, false)
@@ -18,7 +23,8 @@ func makeStruct(fields []struct {
 	name    string
 	jsonKey string
 	typ     types.Type
-}) *types.Struct {
+},
+) *types.Struct {
 	vars := make([]*types.Var, len(fields))
 	tags := make([]string, len(fields))
 	for i, f := range fields {
@@ -33,11 +39,6 @@ func namedType(name string, underlying *types.Struct) *types.Named {
 	return types.NewNamed(obj, underlying, nil)
 }
 
-var (
-	strType = types.Typ[types.String]
-	intType = types.Typ[types.Int]
-)
-
 // ── parseJSONKey ─────────────────────────────────────────────────────────────
 
 func TestParseJSONKey(t *testing.T) {
@@ -45,13 +46,13 @@ func TestParseJSONKey(t *testing.T) {
 		tag  string
 		want string
 	}{
-		"simple":           {`json:"name"`, "name"},
-		"omitempty":        {`json:"name,omitempty"`, "name"},
-		"multi_tag":        {`json:"name,omitempty" graphql:"name"`, "name"},
-		"no_json_tag":      {`graphql:"name"`, ""},
-		"empty":            {"", ""},
-		"dash":             {`json:"-"`, "-"},
-		"underscore_name":  {`json:"my_field"`, "my_field"},
+		"simple":          {`json:"name"`, "name"},
+		"omitempty":       {`json:"name,omitempty"`, "name"},
+		"multi_tag":       {`json:"name,omitempty" graphql:"name"`, "name"},
+		"no_json_tag":     {`graphql:"name"`, ""},
+		"empty":           {"", ""},
+		"dash":            {`json:"-"`, "-"},
+		"underscore_name": {`json:"my_field"`, "my_field"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -217,11 +218,18 @@ func TestWalkTypeForChain(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if len(got) != len(tc.wantSteps) {
-				t.Fatalf("steps len: want %d, got %d\nwant: %v\n got: %v", len(tc.wantSteps), len(got), tc.wantSteps, got)
+				t.Fatalf(
+					"steps len: want %d, got %d\nwant: %v\n got: %v",
+					len(tc.wantSteps),
+					len(got),
+					tc.wantSteps,
+					got,
+				)
 			}
 			for i, ws := range tc.wantSteps {
 				gs := got[i]
-				if gs.GoName != ws.GoName || gs.IsPtr != ws.IsPtr || gs.IsSlice != ws.IsSlice || gs.SliceElemPtr != ws.SliceElemPtr {
+				if gs.GoName != ws.GoName || gs.IsPtr != ws.IsPtr || gs.IsSlice != ws.IsSlice ||
+					gs.SliceElemPtr != ws.SliceElemPtr {
 					t.Errorf("step[%d]: want %+v, got %+v", i, ws, gs)
 				}
 			}
@@ -236,13 +244,22 @@ func TestGenNilGuard(t *testing.T) {
 		steps []chainStep
 		want  string
 	}{
-		"empty":            {nil, ""},
-		"non_ptr_step":     {[]chainStep{{GoName: "A"}}, ""},
-		"single_ptr":       {[]chainStep{{GoName: "A", IsPtr: true}}, "res.A != nil"},
-		"two_ptrs":         {[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B", IsPtr: true}}, "res.A != nil && res.A.B != nil"},
-		"ptr_then_slice":   {[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B", IsSlice: true}}, "res.A != nil"},
-		"slice_first":      {[]chainStep{{GoName: "A", IsSlice: true}}, ""},
-		"ptr_non_ptr_ptr":  {[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B"}, {GoName: "C", IsPtr: true}}, "res.A != nil && res.A.B.C != nil"},
+		"empty":        {nil, ""},
+		"non_ptr_step": {[]chainStep{{GoName: "A"}}, ""},
+		"single_ptr":   {[]chainStep{{GoName: "A", IsPtr: true}}, "res.A != nil"},
+		"two_ptrs": {
+			[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B", IsPtr: true}},
+			"res.A != nil && res.A.B != nil",
+		},
+		"ptr_then_slice": {
+			[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B", IsSlice: true}},
+			"res.A != nil",
+		},
+		"slice_first": {[]chainStep{{GoName: "A", IsSlice: true}}, ""},
+		"ptr_non_ptr_ptr": {
+			[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B"}, {GoName: "C", IsPtr: true}},
+			"res.A != nil && res.A.B.C != nil",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -261,10 +278,13 @@ func TestGenAccessChain(t *testing.T) {
 		steps []chainStep
 		want  string
 	}{
-		"empty":       {nil, "res"},
-		"one_step":    {[]chainStep{{GoName: "A"}}, "res.A"},
-		"two_steps":   {[]chainStep{{GoName: "A"}, {GoName: "B"}}, "res.A.B"},
-		"three_steps": {[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B"}, {GoName: "C", IsSlice: true}}, "res.A.B.C"},
+		"empty":     {nil, "res"},
+		"one_step":  {[]chainStep{{GoName: "A"}}, "res.A"},
+		"two_steps": {[]chainStep{{GoName: "A"}, {GoName: "B"}}, "res.A.B"},
+		"three_steps": {
+			[]chainStep{{GoName: "A", IsPtr: true}, {GoName: "B"}, {GoName: "C", IsSlice: true}},
+			"res.A.B.C",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -482,11 +502,11 @@ func TestGraphqlInlineFragType(t *testing.T) {
 		tag  string
 		want string
 	}{
-		"match":          {`graphql:"... on District"`, "District"},
+		"match":           {`graphql:"... on District"`, "District"},
 		"match_with_json": {`json:"foo" graphql:"... on MetaDistrict"`, "MetaDistrict"},
-		"no_tag":         {`json:"foo"`, ""},
+		"no_tag":          {`json:"foo"`, ""},
 		"regular_graphql": {`graphql:"fieldName"`, ""},
-		"empty":          {"", ""},
+		"empty":           {"", ""},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {

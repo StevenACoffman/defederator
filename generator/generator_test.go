@@ -11,7 +11,15 @@ import (
 )
 
 func TestGenerate(t *testing.T) {
-	supergraphRel := filepath.Join("..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql")
+	supergraphRel := filepath.Join(
+		"..",
+		"..",
+		"gorouter",
+		"federation",
+		"testdata",
+		"golden",
+		"supergraph.graphql",
+	)
 	supergraphPath, err := filepath.Abs(supergraphRel)
 	if err != nil {
 		t.Fatal(err)
@@ -29,7 +37,7 @@ query GetProduct($id: ID!) {
     sku
   }
 }
-`), 0644); err2 != nil {
+`), 0o644); err2 != nil {
 		t.Fatal(err2)
 	}
 

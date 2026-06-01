@@ -9,17 +9,15 @@ import (
 	"sort"
 
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
-
-	defConfig "github.com/StevenACoffman/defederator/config"
-	"github.com/StevenACoffman/gorouter/federation"
-
 	"github.com/gqlgo/gqlgenc/clientgenv2"
 	gqlgencConfig "github.com/gqlgo/gqlgenc/config"
 	"github.com/gqlgo/gqlgenc/parsequery"
 	"github.com/gqlgo/gqlgenc/querydocument"
-
 	"github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
+
+	defConfig "github.com/StevenACoffman/defederator/config"
+	"github.com/StevenACoffman/gorouter/federation"
 )
 
 // Generate runs the full defederator code-generation pipeline for cfg.
@@ -123,7 +121,10 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: parse query documents: %w", err)
 	}
 
-	operationQueryDocuments, err := querydocument.QueryDocumentsByOperations(gqlgencCfg.GQLConfig.Schema, queryDocument.Operations)
+	operationQueryDocuments, err := querydocument.QueryDocumentsByOperations(
+		gqlgencCfg.GQLConfig.Schema,
+		queryDocument.Operations,
+	)
 	if err != nil {
 		return fmt.Errorf("generate: build per-operation documents: %w", err)
 	}
@@ -136,7 +137,12 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	generateCfg := buildGenerateConfig(cfg)
 
 	sourceGenerator := clientgenv2.NewSourceGenerator(gqlgencCfg.GQLConfig, clientPkg, generateCfg)
-	source := clientgenv2.NewSource(gqlgencCfg.GQLConfig.Schema, queryDocument, sourceGenerator, generateCfg)
+	source := clientgenv2.NewSource(
+		gqlgencCfg.GQLConfig.Schema,
+		queryDocument,
+		sourceGenerator,
+		generateCfg,
+	)
 
 	fragments, err := source.Fragments()
 	if err != nil {
