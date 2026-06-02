@@ -39,7 +39,7 @@ func LoadOperationSources(patterns []string, baseDir string) ([]*ast.Source, err
 			case ".graphql", ".graphqls", ".gql":
 				graphqlFiles = append(graphqlFiles, m)
 			case ".go":
-					// io.Discard: migrate reads operation files for analysis only and
+				// io.Discard: migrate reads operation files for analysis only and
 				// the per-literal trace is irrelevant to the user. `defederator
 				// generate` later prints the same files via the generator's
 				// verbose path if the user asked for it.

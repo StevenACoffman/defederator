@@ -53,8 +53,12 @@ func DefederatorYAML(in YAMLInput) (string, error) {
 
 	b.WriteString("query:\n")
 	for _, op := range gq.Operations {
+		// Always single-quote operation patterns: glob entries like `*.go` or
+		// `**/*.graphql` start with characters YAML interprets as anchors,
+		// aliases, or merge keys (`*`, `&`, `<<`). Quoting makes the value a
+		// plain string regardless of leading metacharacter.
 		b.WriteString("  - ")
-		b.WriteString(op)
+		b.WriteString(yamlSingleQuote(op))
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
@@ -169,6 +173,15 @@ func bindingsSection(
 	}
 
 	return b.String()
+}
+
+// yamlSingleQuote wraps s in YAML single quotes, doubling any embedded single
+// quote per the YAML 1.2 spec for escaping an apostrophe inside a single-quoted
+// scalar. Used for operation patterns like `*.go` where the leading `*` would
+// otherwise be parsed as a YAML alias reference.
+func yamlSingleQuote(s string) string {
+	const sq = "'"
+	return sq + strings.ReplaceAll(s, sq, sq+sq) + sq
 }
 
 func sortedKeys(m map[string]config.TypeBinding) []string {

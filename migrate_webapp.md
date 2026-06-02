@@ -296,7 +296,7 @@ for svc in \
   mcp-gateway notifications programs progress-reports progress \
   recommendations rest-gateway rewards search users zendesk; do
     echo "=== $svc ==="
-    defederator migrate --dry-run "$WEBAPP/services/$svc"
+    defederator migrate --force "$WEBAPP/services/$svc"
 done
 ```
 

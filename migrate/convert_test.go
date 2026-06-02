@@ -22,8 +22,8 @@ func TestDefederatorYAML_Basic(t *testing.T) {
 	checks := []string{
 		"schema: ../../gengraphql/composed_schema.graphql",
 		"query:",
-		"  - cross_service/*.go",
-		"  - tasks/*.go",
+		"  - 'cross_service/*.go'",
+		"  - 'tasks/*.go'",
 		"client:",
 		"filename: ./generated/defederator/client.go",
 		"package:  defederator",
