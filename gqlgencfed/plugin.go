@@ -102,6 +102,20 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		}
 	}
 
+	// Same model-binding step as generator.Generate: fill in INPUT_OBJECT and
+	// ENUM models that the user hasn't bound explicitly. Without this,
+	// SourceGenerator.Type panics on any enum used in a response field.
+	enums := generator.CollectEnums(cfg.Schema)
+	basicModels := generator.BasicTypeModels(cfg.Schema, p.client.ImportPath())
+	if cfg.Models == nil {
+		cfg.Models = make(gqlgenConfig.TypeMap, len(basicModels))
+	}
+	for name, entry := range basicModels {
+		if _, ok := cfg.Models[name]; !ok {
+			cfg.Models[name] = entry
+		}
+	}
+
 	operationQueryDocuments := p.operationQueryDocuments
 	if operationQueryDocuments == nil {
 		var err error
@@ -160,7 +174,7 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		p.client,
 		planSpecs,
 		"baked",
-		nil, // gqlgencfed callers register enum models via gqlgen config directly
+		enums,
 	); err != nil {
 		return fmt.Errorf("gqlgencfed: render template: %w", err)
 	}

@@ -114,15 +114,19 @@
 
 {{- range $enum := .Enum }}
 // {{ $enum.GoName }} is the GraphQL enum {{ $enum.GraphQLName }}.
-{{- if $enum.Description }}
-// {{ commentLine $enum.Description }}
+{{- range $line := descriptionLines $enum.Description }}
+// {{ $line }}
 {{- end }}
 type {{ $enum.GoName }} string
 
 const (
 {{- range $val := $enum.Values }}
-{{- if $val.Description }}
-	// {{ $val.GoName }} is the GraphQL value {{ $val.GraphQLName }}. {{ commentLine $val.Description }}
+{{- $valLines := descriptionLines $val.Description }}
+{{- if $valLines }}
+	// {{ $val.GoName }} is the GraphQL value {{ $val.GraphQLName }}.
+{{- range $line := $valLines }}
+	// {{ $line }}
+{{- end }}
 {{- end }}
 	{{ $val.GoName }} {{ $enum.GoName }} = "{{ $val.GraphQLName }}"
 {{- end }}

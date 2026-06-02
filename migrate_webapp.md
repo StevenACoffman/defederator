@@ -25,38 +25,44 @@ For each service directory it:
 
 1. Reads `genqlient.yaml` and derives `.defederator.yml` (schema path, client output path, scalar bindings, INPUT_OBJECT bindings for types owned by this service).
 2. Reads the supergraph SDL and generates `cross_service/client.go` with a `newFederationClient` constructor and an `exampleSubgraphURLs` helper wired to service discovery.
+3. By default, chains into the `defederator` generate step using the just-written `.defederator.yml`: writes `generated/defederator/client.go` (typed operation structs + enum types) and `generated/defederator/federation_exec.go` (self-contained execution engine). Pass `--no-generate` to skip this step and run `defederator` manually later.
 
-Both files are written only if they do not exist, unless `--force` is passed.
+Steps 1–2 are written only if they do not exist, unless `--force` is passed. Step 3, when enabled, always runs and overwrites the generated client.
 
-## What migrate leaves incomplete
+## What migrate handles automatically
 
-**You must review and fix these things after running migrate:**
+The migrate command derives a complete, ready-to-commit `.defederator.yml` and
+`cross_service/client.go` from the service's `genqlient.yaml` plus its existing
+cross-service Go files. Specifically:
 
-### 1. Subgraph list is the full supergraph
+- **Subgraph list is pruned** to only the subgraphs the service's operations
+  actually query, determined by running the federation query planner against
+  every operation and collecting the unique set of touched subgraphs. The own
+  service is always kept regardless of self-references.
+- **Auth factory shape matches the service's call patterns.** Migrate scans the
+  cross_service `.go` files for `ctx.GraphQL().AsUser()`,
+  `.AsServiceAdmin()`, and `WithKALocale(...).AsUser()` chains and emits one
+  factory per detected flavor, all funneling through a shared
+  `newJobFederationClient`. Services with a single auth flavor get the simpler
+  `newFederationClient(ctx _federationCtx)` form.
+- **INPUT_OBJECT bindings are pruned** to the intersection of (a) types this
+  service owns in the supergraph and (b) types that appear as variable types
+  in at least one operation. No noisy bindings for types nothing references.
+- **Scalar bindings pass through verbatim** from `genqlient.yaml`. Defederator
+  generate runs inside the webapp module so paths like
+  `cloud.google.com/go/civil.Date` and `github.com/Khan/webapp/pkg/content.Author`
+  resolve correctly.
+- **Enums are auto-emitted** as typed Go strings (genqlient-style) directly into
+  the generated client package; no binding is needed in `.defederator.yml`
+  unless you want to override (e.g. point at an existing Go type elsewhere).
+- **No `TODO` scaffolding** is left in the generated `cross_service/client.go`.
 
-`_subgraphServices` in `cross_service/client.go` contains every subgraph in the composed schema (~30 entries). You need to prune it to only the subgraphs this service's operations actually query. Leaving extra entries is harmless at runtime but wastes service-discovery calls and makes the map misleading.
+You should still review the generated files before committing, but no manual
+edits are required for the cases above.
 
-To identify which subgraphs a service uses, search for `@join__field(graph:` annotations in the supergraph SDL for types that the service's operations reference, or run `defederator --dry-run` and observe which subgraph URLs appear in the generated plan specs.
+## defederator code generation (only with `--no-generate`)
 
-### 2. Auth factory pattern is not generated
-
-The generated `newFederationClient` accepts a single `_federationCtx`. Services like `ai-guide` need separate `NewUserFederationClient` / `NewAdminFederationClient` / `newLocaleUserFederationClient` constructors that each call an inner `newJobFederationClient(httpClient *http.Client, sd service_discovery.Client)`. The tool generates the simplest single-constructor form. Promote it to the multi-factory pattern manually if your service issues federation calls on behalf of multiple auth roles.
-
-### 3. INPUT_OBJECT bindings may be a superset
-
-`.defederator.yml` bindings include all INPUT_OBJECT types declared with `@join__type(graph: YOUR_SERVICE)` in the supergraph. If your service's operations never pass some of those types as arguments, the binding is unused. Unused bindings are harmless but add noise; remove them after confirming the generated code compiles without them.
-
-### 4. Scalar bindings use graphql.String as placeholder
-
-All scalar types that are not `time.Time`, `interface{}`, or `map[string]interface{}` are bound to `github.com/99designs/gqlgen/graphql.String`. Replace each one with the real Go type from your service's genqlient package (or leave as `graphql.String` if the field is never returned in a response your code reads).
-
-### 5. cross_service/client.go is a scaffold, not final
-
-The generated file has TODOs at the top documenting the multi-factory pattern and the INPUT_OBJECT binding reminder. Read them. Remove them once you have handled those cases.
-
-### 6. defederator code generation not yet run
-
-`migrate` only writes config and the client scaffold. After migration you still need to run:
+By default `migrate` runs generation automatically as step 3 (see "What migrate does"). You only need this step if you passed `--no-generate` to inspect the config before generating, or if you regenerate after editing `.defederator.yml`:
 
 ```sh
 cd ~/khan/webapp/services/<name>
@@ -294,13 +300,16 @@ for svc in \
 done
 ```
 
-Remove `--dry-run` once you are satisfied with the output. Pass `--force` to overwrite existing files.
+Remove `--dry-run` once you are satisfied with the output. Pass `--force` to overwrite existing files. Pass `--no-generate` in the batch loop if you want to review every `.defederator.yml` before any client is generated; otherwise each iteration also writes `generated/defederator/client.go` for that service.
 
 ---
 
-## After migrate: generate defederator code
+## Regenerating after edits
 
-Once `.defederator.yml` is in place and you have pruned the subgraph list:
+`defederator migrate` already runs generation as part of step 3 above. You only need a manual generate when:
+
+- You passed `--no-generate` to migrate.
+- You have edited `.defederator.yml` (e.g. pruned the subgraph list, replaced a scalar placeholder) and want the typed client to match.
 
 ```sh
 cd ~/khan/webapp/services/<name>
@@ -309,7 +318,7 @@ defederator
 
 This writes:
 
-- `generated/defederator/client.go` — typed operation structs and methods
+- `generated/defederator/client.go` — typed operation structs, methods, and enum types
 - `generated/defederator/federation_exec.go` — self-contained execution engine
 
 These files must be committed alongside the config and client scaffold.

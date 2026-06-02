@@ -8,18 +8,6 @@ import (
 	"github.com/StevenACoffman/defederator/config"
 )
 
-// graphqlStringType is the canonical defed binding for GraphQL scalars that
-// cannot be resolved outside the webapp module.
-const graphqlStringType = "github.com/99designs/gqlgen/graphql.String"
-
-// keepBindingType lists the Go types that are retained verbatim in
-// .defederator.yml — all other scalar types are replaced with graphqlStringType.
-var keepBindingType = map[string]bool{
-	"time.Time":              true,
-	"interface{}":            true,
-	"map[string]interface{}": true,
-}
-
 // GenqlientConfig is the parsed subset of a genqlient.yaml relevant to migration.
 type GenqlientConfig struct {
 	Schema     string
@@ -44,7 +32,9 @@ type YAMLInput struct {
 //   - schema:     → schema: (verbatim)
 //   - operations: → query: (same list)
 //   - generated:  → client.filename: (path with genqlient replaced by defederator, ./ prefix)
-//   - bindings:   → scalar types not in keepBindingType become graphql.String
+//   - bindings:   → kept verbatim from genqlient.yaml (defederator generate
+//     runs inside the webapp module, so package paths like
+//     github.com/Khan/webapp/pkg/content.Author resolve correctly)
 //   - url_mode: enum is always added (webapp supergraph uses placeholder URLs)
 //   - generate.clientInterfaceName: FederationClient is always added
 //   - generate.optional: pointer is always added
@@ -107,7 +97,11 @@ func defederatorClientFilename(genqlientGenerated string) string {
 // bindingsSection renders the full bindings: block, including scalar bindings,
 // ENUM comment, and optionally INPUT_OBJECT bindings.
 // Returns an empty string when there are no bindings of any kind.
-func bindingsSection(bindings map[string]config.TypeBinding, inputObjects []string, genqlientPkg string) string {
+func bindingsSection(
+	bindings map[string]config.TypeBinding,
+	inputObjects []string,
+	genqlientPkg string,
+) string {
 	hasScalars := len(bindings) > 0
 	hasInputObjects := len(inputObjects) > 0 && genqlientPkg != ""
 	if !hasScalars && !hasInputObjects {
@@ -118,9 +112,13 @@ func bindingsSection(bindings map[string]config.TypeBinding, inputObjects []stri
 	b.WriteString("bindings:\n")
 
 	if hasScalars {
-		b.WriteString("  # Scalars — bind to graphql.String for types that can't be resolved outside\n")
-		b.WriteString("  # the webapp module (civil.Date, pkg/content types) or lack a package path\n")
-		b.WriteString("  # (plain builtins). graphql.String marshals as a Go string.\n")
+		b.WriteString(
+			"  # Scalars — copied verbatim from genqlient.yaml. Defederator generate runs\n",
+		)
+		b.WriteString(
+			"  # inside the webapp module so any github.com/Khan/... or stdlib type path\n",
+		)
+		b.WriteString("  # resolves correctly.\n")
 
 		keys := sortedKeys(bindings)
 		for _, k := range keys {
@@ -129,36 +127,34 @@ func bindingsSection(bindings map[string]config.TypeBinding, inputObjects []stri
 			b.WriteString(k)
 			b.WriteString(":\n")
 			b.WriteString("    type: ")
-			if keepBindingType[v.Type] {
-				b.WriteString(v.Type)
+			b.WriteString(v.Type)
+			b.WriteString("\n")
+			if v.Marshaler != "" {
+				b.WriteString("    marshaler: ")
+				b.WriteString(v.Marshaler)
 				b.WriteString("\n")
-				if v.Marshaler != "" {
-					b.WriteString("    marshaler: ")
-					b.WriteString(v.Marshaler)
-					b.WriteString("\n")
-				}
-				if v.Unmarshaler != "" {
-					b.WriteString("    unmarshaler: ")
-					b.WriteString(v.Unmarshaler)
-					b.WriteString("\n")
-				}
-			} else {
-				b.WriteString(graphqlStringType)
+			}
+			if v.Unmarshaler != "" {
+				b.WriteString("    unmarshaler: ")
+				b.WriteString(v.Unmarshaler)
 				b.WriteString("\n")
 			}
 		}
 	}
 
-	// ENUM comment — always emitted when there are any bindings.
-	b.WriteString("  # ENUM types are NOT bound here — the generator's post-Init() mapping\n")
-	b.WriteString("  # automatically assigns them to graphql.String. Any ENUM values used as\n")
-	b.WriteString("  # operation inputs in cross_service code will need to be passed as plain\n")
-	b.WriteString("  # strings (the genqlient constants are string-typed underneath and can be\n")
-	b.WriteString("  # cast: string(genqlient.SomeEnumValue)).\n")
+	// ENUM comment — always emitted when there are any bindings. Reflects the
+	// generator's behaviour: enum types are auto-emitted as named Go strings
+	// (genqlient-style) in the client package and do not require a binding.
+	b.WriteString("  # Enums are auto-emitted as typed Go strings so no need to bind here unless\n")
+	b.WriteString("  # you need to override (e.g. to point at an existing Go type elsewhere).\n")
 
 	if hasInputObjects {
-		b.WriteString("  # INPUT_OBJECT bindings — keep genqlient types so callers don't need to change.\n")
-		b.WriteString("  # INPUT_OBJECTs only appear as operation inputs (never in response fields),\n")
+		b.WriteString(
+			"  # INPUT_OBJECT bindings — keep genqlient types so callers don't need to change.\n",
+		)
+		b.WriteString(
+			"  # INPUT_OBJECTs only appear as operation inputs (never in response fields),\n",
+		)
 		b.WriteString("  # so gqlgenc won't try to resolve them as response types.\n")
 		for _, name := range inputObjects {
 			b.WriteString("  ")

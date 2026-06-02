@@ -14,6 +14,9 @@ import (
 	gqlgencConfig "github.com/gqlgo/gqlgenc/config"
 )
 
+//go:embed template.gotpl
+var federationTemplate string
+
 // EnumDef describes a single GraphQL enum to emit as a Go named-string type.
 // The template renders one `type T string` declaration plus a `const ( … )` block
 // and a `var AllT = []T{ … }` slice, matching genqlient's output.
@@ -31,20 +34,59 @@ type EnumValueDef struct {
 	Description string
 }
 
-// CommentLine renders an arbitrary string as a single-line Go comment payload by
-// collapsing all whitespace (including newlines) to single spaces and stripping
-// leading/trailing whitespace. Used so that multi-line GraphQL descriptions are
-// safe to embed in generated `// …` enum/value doc comments without spilling
-// out of the comment block.
-func CommentLine(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+// genGettersGenerator is a local copy of clientgenv2.GenGettersGenerator.
+// clientgenv2 does not export it, so we duplicate the ~80 lines here.
+type genGettersGenerator struct {
+	clientPackageName string
+}
+
+// inlineFragField pairs a Go struct field name with the concrete GraphQL type it
+// represents via a graphql:"... on Type" tag.
+type inlineFragField struct {
+	goName   string // Go field name, e.g. "District"
+	typeName string // concrete GraphQL type, e.g. "District"
+}
+
+// DescriptionLines splits a GraphQL description into the sequence of payload
+// strings that a generated Go `// …` comment block should contain — one element
+// per line, with each line's leading/trailing whitespace trimmed.
+//
+// The template emits `// {{ . }}` for each returned element, so each line is
+// individually prefixed with `// ` (matching genqlient's writeDescription).
+// Blank lines inside multi-paragraph descriptions are preserved as empty
+// strings, which render as bare `//` lines and keep paragraph breaks visible
+// in `go doc` output.
+//
+// Returns nil for an all-whitespace description so callers can `if len(...) > 0`
+// to suppress an empty comment.
+func DescriptionLines(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	raw := strings.Split(s, "\n")
+	out := make([]string, len(raw))
+	for i, line := range raw {
+		out[i] = strings.TrimSpace(line)
+	}
+	return out
 }
 
 // GoConstName converts a GraphQL enum value name (typically SCREAMING_SNAKE_CASE)
-// into a Go constant suffix using genqlient's `goConstName` rules: each underscore
-// is dropped, the character after each underscore (and the first character) is
-// upper-cased, and all other characters are lower-cased. Identical input/output to
-// `genqlient/generate/util.go`'s goConstName so generated code matches genqlient.
+// into a Go constant suffix.
+//
+// The rules: each underscore is dropped, the character after each underscore
+// (and the first character) is upper-cased, and all other characters are
+// lower-cased. So "UNEXPECTED_ERROR" → "UnexpectedError".
+//
+// This is a behavioural port of genqlient's unexported `goConstName`:
+//
+//	source: github.com/Khan/genqlient v0.8.1, file generate/util.go (line 52)
+//
+// Defederator generates enums in genqlient's exact format so callers migrating
+// from genqlient need no source changes. If you bump the genqlient version in
+// go.mod, re-check that file: if its goConstName diverges, update this port
+// and the version tag above in lockstep, with a test case demonstrating the
+// new behaviour.
 func GoConstName(s string) string {
 	if strings.TrimLeft(s, "_") == "" {
 		return s
@@ -63,22 +105,6 @@ func GoConstName(s string) string {
 		prev = r
 		return ret
 	}, s)
-}
-
-//go:embed template.gotpl
-var federationTemplate string
-
-// genGettersGenerator is a local copy of clientgenv2.GenGettersGenerator.
-// clientgenv2 does not export it, so we duplicate the ~80 lines here.
-type genGettersGenerator struct {
-	clientPackageName string
-}
-
-// inlineFragField pairs a Go struct field name with the concrete GraphQL type it
-// represents via a graphql:"... on Type" tag.
-type inlineFragField struct {
-	goName   string // Go field name, e.g. "District"
-	typeName string // concrete GraphQL type, e.g. "District"
 }
 
 // RenderFederationTemplate renders the federation client template.
@@ -104,8 +130,8 @@ func RenderFederationTemplate(
 
 	// Build response type map for entity fetch code generation.
 	respTypeByName := make(map[string]types.Type, len(operationResponses))
-	for _, or_ := range operationResponses {
-		respTypeByName[or_.Name] = or_.Type
+	for _, or := range operationResponses {
+		respTypeByName[or.Name] = or.Type
 	}
 
 	// Determine if any operation uses typed entity merge (controls json import).
@@ -128,8 +154,8 @@ func RenderFederationTemplate(
 
 	// Determine if any response type needs a custom UnmarshalJSON (controls json import).
 	hasInlineFragType := false
-	for _, or_ := range operationResponses {
-		if genUnmarshalJSONMethod(or_.Name, or_.Type) != "" {
+	for _, or := range operationResponses {
+		if genUnmarshalJSONMethod(or.Name, or.Type) != "" {
 			hasInlineFragType = true
 			break
 		}
@@ -157,10 +183,8 @@ func RenderFederationTemplate(
 			"genGetters":           g.genFunc(),
 			"genConversionGetters": g.conversionGettersFunc(fragments),
 			"genEntityFetch":       g.genEntityFetchFunc(operationResponses, planSpecs),
-			"genUnmarshalJSON": func(name string, t types.Type) string {
-				return genUnmarshalJSONMethod(name, t)
-			},
-			"commentLine": CommentLine,
+			"genUnmarshalJSON":     genUnmarshalJSONMethod,
+			"descriptionLines":     DescriptionLines,
 		},
 	})
 	if err != nil {

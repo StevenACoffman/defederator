@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,7 +36,7 @@ var alsoNotAQuery = ` + "`" + `query without annotation {}` + "`" + `
 		t.Fatal(err)
 	}
 
-	queries, err := extractQueriesFromGoFile(f)
+	queries, err := extractQueriesFromGoFile(f, io.Discard)
 	if err != nil {
 		t.Fatalf("extractQueriesFromGoFile: %v", err)
 	}
@@ -68,7 +69,7 @@ func TestExtractQueriesFromGoFile_SourcePositions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	queries, err := extractQueriesFromGoFile(f)
+	queries, err := extractQueriesFromGoFile(f, io.Discard)
 	if err != nil {
 		t.Fatalf("extractQueriesFromGoFile: %v", err)
 	}
@@ -93,7 +94,7 @@ const x = "query NoAnnotation { field }"
 		t.Fatal(err)
 	}
 
-	queries, err := extractQueriesFromGoFile(f)
+	queries, err := extractQueriesFromGoFile(f, io.Discard)
 	if err != nil {
 		t.Fatalf("extractQueriesFromGoFile: %v", err)
 	}

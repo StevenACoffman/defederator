@@ -4,10 +4,10 @@ package generator
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
 	"github.com/gqlgo/gqlgenc/clientgenv2"
@@ -22,8 +22,17 @@ import (
 )
 
 // Generate runs the full defederator code-generation pipeline for cfg.
+//
+// When cfg.Verbose is true, per-pattern, per-file, per-literal, per-match,
+// and per-operation progress lines are written to stderr. Otherwise the only
+// user-facing output is the final "defederator: wrote …" line emitted by the
+// CLI (see cmd/defederator/main.go).
 func Generate(ctx context.Context, cfg *defConfig.Config) error {
-	fmt.Printf("Generating with config: %+v\n", cfg)
+	log := io.Discard
+	if cfg.Verbose {
+		log = os.Stderr
+	}
+	_, _ = fmt.Fprintf(log, "Generating with config: %+v\n", cfg)
 	sdlPath := cfg.SchemaPath()
 	sdlBytes, err := os.ReadFile(sdlPath)
 	if err != nil {
@@ -41,10 +50,7 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: strip federation types: %w", err)
 	}
 
-	gqlgencCfg, err := buildGqlgencConfig(cfg, cleanSDL)
-	if err != nil {
-		return fmt.Errorf("generate: build gqlgenc config: %w", err)
-	}
+	gqlgencCfg := buildGqlgencConfig(cfg, cleanSDL)
 
 	// Parse the schema directly from the clean SDL string.
 	// We bypass gqlgencCfg.LoadSchema to avoid its remote-introspection path.
@@ -58,77 +64,31 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: init gqlgen config: %w", err)
 	}
 
-	// Map user-defined types that lack an explicit binding so source_generator
-	// can resolve them.
-	//
-	// - INPUT_OBJECT types are mapped to graphql.String. The generated client
-	//   serializes input objects via the JSON marshaler in each operation method,
-	//   so the Go-side representation can be opaque.
-	// - ENUM types are registered as named string types in the client package
-	//   itself. The template (see template.gotpl) emits a Go `type T string` plus
-	//   typed `const ( … )` constants, matching genqlient's enum output. The
-	//   binder's package-load fallback (source_generator.go's syntheticNamedType)
-	//   handles the fact that the package being generated isn't on disk yet.
-	//
-	// gqlgenc calls Type(name) for any field where IsBasicType() returns true,
-	// which covers both enums (no sub-selections) and input types (used as args).
-	// gqlgen's Init() registers introspection enums but leaves user-defined enums
-	// and input objects unmapped when no server model file is generated.
+	// Register model bindings for user-defined INPUT_OBJECT and ENUM types so
+	// gqlgenc's SourceGenerator.Type() can resolve them. See CollectEnums and
+	// BasicTypeModels for details. User-supplied bindings in cfg.Models always
+	// win; we only fill in unbound names.
 	clientPkg := gqlgenConfig.PackageConfig{
 		Filename: cfg.ClientFilename(),
 		Package:  cfg.Client.Package,
 	}
-	clientImportPath := clientPkg.ImportPath()
-
+	enums := CollectEnums(gqlgencCfg.GQLConfig.Schema)
+	basicModels := BasicTypeModels(gqlgencCfg.GQLConfig.Schema, clientPkg.ImportPath())
 	if gqlgencCfg.GQLConfig.Models == nil {
-		gqlgencCfg.GQLConfig.Models = make(gqlgenConfig.TypeMap)
+		gqlgencCfg.GQLConfig.Models = make(gqlgenConfig.TypeMap, len(basicModels))
 	}
-	var enums []*EnumDef
-	for name, def := range gqlgencCfg.GQLConfig.Schema.Types {
-		switch def.Kind {
-		case ast.InputObject:
-			if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
-				gqlgencCfg.GQLConfig.Models[name] = gqlgenConfig.TypeMapEntry{
-					Model: gqlgenConfig.StringList{"github.com/99designs/gqlgen/graphql.String"},
-				}
-			}
-		case ast.Enum:
-			if strings.HasPrefix(name, "__") {
-				// Skip introspection enums; gqlgen already registers them.
-				continue
-			}
-			enum := &EnumDef{
-				GoName:      name,
-				GraphQLName: name,
-				Description: def.Description,
-			}
-			for _, v := range def.EnumValues {
-				enum.Values = append(enum.Values, EnumValueDef{
-					GoName:      name + GoConstName(v.Name),
-					GraphQLName: v.Name,
-					Description: v.Description,
-				})
-			}
-			sort.Slice(enum.Values, func(i, j int) bool {
-				return enum.Values[i].GraphQLName < enum.Values[j].GraphQLName
-			})
-			enums = append(enums, enum)
-
-			if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
-				gqlgencCfg.GQLConfig.Models[name] = gqlgenConfig.TypeMapEntry{
-					Model: gqlgenConfig.StringList{clientImportPath + "." + name},
-				}
-			}
+	for name, entry := range basicModels {
+		if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
+			gqlgencCfg.GQLConfig.Models[name] = entry
 		}
 	}
-	sort.Slice(enums, func(i, j int) bool { return enums[i].GoName < enums[j].GoName })
 
 	// Schema.Implements iteration order is non-deterministic; sort for stable output.
 	for _, v := range gqlgencCfg.GQLConfig.Schema.Implements {
 		sort.Slice(v, func(i, j int) bool { return v[i].Name < v[j].Name })
 	}
 
-	expandedPaths, err := expandGlobs(cfg.Query, cfg.Dir)
+	expandedPaths, err := expandGlobs(cfg.Query, cfg.Dir, log)
 	if err != nil {
 		return fmt.Errorf("generate: expand query globs: %w", err)
 	}
@@ -140,7 +100,7 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		case hasGraphQLExt(p):
 			graphqlPaths = append(graphqlPaths, p)
 		case hasGoExt(p):
-			embedded, err := extractQueriesFromGoFile(p)
+			embedded, err := extractQueriesFromGoFile(p, log)
 			if err != nil {
 				return fmt.Errorf("generate: extract queries from %s: %w", p, err)
 			}
@@ -196,9 +156,9 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	if err != nil {
 		return fmt.Errorf("generate: generate operations: %w", err)
 	}
-	fmt.Printf("Generated %d operations\n", len(operations))
+	_, _ = fmt.Fprintf(log, "Generated %d operations\n", len(operations))
 	for _, op := range operations {
-		fmt.Printf("Operation: %s\n", op.Name)
+		_, _ = fmt.Fprintf(log, "Operation: %s\n", op.Name)
 	}
 
 	urlMode := cfg.URLMode
@@ -256,7 +216,7 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	return nil
 }
 
-func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) (*gqlgencConfig.Config, error) {
+func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) *gqlgencConfig.Config {
 	gqlCfg := gqlgenConfig.DefaultConfig()
 	gqlCfg.Sources = []*ast.Source{
 		{Name: "supergraph", Input: cleanSDL},
@@ -276,11 +236,10 @@ func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) (*gqlgencConfig.
 		}
 	}
 
-	gqlgencCfg := &gqlgencConfig.Config{
+	return &gqlgencConfig.Config{
 		GQLConfig: gqlCfg,
 		Query:     cfg.Query,
 	}
-	return gqlgencCfg, nil
 }
 
 func hasGraphQLExt(p string) bool {

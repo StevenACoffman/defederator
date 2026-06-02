@@ -1,6 +1,7 @@
 package generator
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,7 +15,7 @@ func TestExpandGlobs_ExactPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := expandGlobs([]string{f}, tmp)
+	got, err := expandGlobs([]string{f}, tmp, io.Discard)
 	if err != nil {
 		t.Fatalf("expandGlobs: %v", err)
 	}
@@ -31,7 +32,7 @@ func TestExpandGlobs_SingleStar(t *testing.T) {
 		}
 	}
 
-	got, err := expandGlobs([]string{filepath.Join(tmp, "*.graphql")}, tmp)
+	got, err := expandGlobs([]string{filepath.Join(tmp, "*.graphql")}, tmp, io.Discard)
 	if err != nil {
 		t.Fatalf("expandGlobs: %v", err)
 	}
@@ -62,7 +63,7 @@ func TestExpandGlobs_DoubleStar(t *testing.T) {
 		}
 	}
 
-	got, err := expandGlobs([]string{filepath.Join(tmp, "**/*.graphql")}, tmp)
+	got, err := expandGlobs([]string{filepath.Join(tmp, "**/*.graphql")}, tmp, io.Discard)
 	if err != nil {
 		t.Fatalf("expandGlobs: %v", err)
 	}
@@ -73,7 +74,7 @@ func TestExpandGlobs_DoubleStar(t *testing.T) {
 
 func TestExpandGlobs_EmptyGlobErrors(t *testing.T) {
 	tmp := t.TempDir()
-	_, err := expandGlobs([]string{filepath.Join(tmp, "*.graphql")}, tmp)
+	_, err := expandGlobs([]string{filepath.Join(tmp, "*.graphql")}, tmp, io.Discard)
 	if err == nil {
 		t.Fatal("want error for glob matching no files, got nil")
 	}
@@ -86,7 +87,7 @@ func TestExpandGlobs_Dedup(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := expandGlobs([]string{f, f}, tmp)
+	got, err := expandGlobs([]string{f, f}, tmp, io.Discard)
 	if err != nil {
 		t.Fatalf("expandGlobs: %v", err)
 	}

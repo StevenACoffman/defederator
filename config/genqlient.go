@@ -20,7 +20,7 @@ type genqlientConfig struct {
 // stringOrList accepts either a single string or a list of strings in YAML.
 type stringOrList []string
 
-func (s *stringOrList) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (s *stringOrList) UnmarshalYAML(unmarshal func(any) error) error {
 	var single string
 	if err := unmarshal(&single); err == nil {
 		*s = []string{single}
@@ -67,5 +67,12 @@ func LoadGenqlientConfig(path string) (*Config, error) {
 		Package:  gq.Package,
 	}
 
+	// Deliberately no Validate() call here: this function is also used by
+	// `defederator migrate` to read a genqlient.yaml's raw fields (schema,
+	// operations, bindings). A genqlient config without a `package:` field is
+	// legitimate input for migrate, even though it would be insufficient for
+	// `defederator generate`. The fallback path in LoadConfigFromDir wraps
+	// this function with a Validate() call when the Config is intended for
+	// direct use by the generator.
 	return cfg, nil
 }

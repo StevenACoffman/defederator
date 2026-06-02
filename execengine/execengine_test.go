@@ -45,9 +45,9 @@ func TestDoGraphQLIntoMerged(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			body := tc.body
 			srv := httptest.NewServer(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
-					w.Write([]byte(body))
+					_, _ = w.Write([]byte(body))
 				}),
 			)
 			defer srv.Close()
@@ -123,9 +123,9 @@ func TestDoGraphQLInto(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			body := tc.body
 			srv := httptest.NewServer(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
-					w.Write([]byte(body))
+					_, _ = w.Write([]byte(body))
 				}),
 			)
 			defer srv.Close()
@@ -163,9 +163,9 @@ func TestDoGraphQLInto(t *testing.T) {
 
 	// Untyped dest: when dest is *any, json decodes data into the interface.
 	t.Run("untyped_any_populated", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte(`{"data":{"id":"p1"}}`))
+			_, _ = w.Write([]byte(`{"data":{"id":"p1"}}`))
 		}))
 		defer srv.Close()
 
@@ -194,10 +194,10 @@ func TestDoGraphQLInto(t *testing.T) {
 
 func jsonResp(t *testing.T, data any) http.HandlerFunc {
 	t.Helper()
-	return func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, _ *http.Request) {
 		b, _ := json.Marshal(map[string]any{"data": data})
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(b)
+		_, _ = w.Write(b)
 	}
 }
 
@@ -308,7 +308,7 @@ func TestExecute_EntityFetch(t *testing.T) {
 	defer sgA.Close()
 
 	// Subgraph B: _entities resolver returns sku.
-	sgB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sgB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		resp := map[string]any{
 			"data": map[string]any{
 				"_entities": []any{
@@ -318,7 +318,7 @@ func TestExecute_EntityFetch(t *testing.T) {
 		}
 		b, _ := json.Marshal(resp)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(b)
+		_, _ = w.Write(b)
 	}))
 	defer sgB.Close()
 
@@ -381,14 +381,14 @@ func TestExecute_NilClientUsesDefault(t *testing.T) {
 }
 
 func TestExecute_GraphQLErrors(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		resp := map[string]any{
 			"data":   nil,
 			"errors": []map[string]any{{"message": "not found"}},
 		}
 		b, _ := json.Marshal(resp)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(b)
+		_, _ = w.Write(b)
 	}))
 	defer srv.Close()
 
@@ -667,9 +667,9 @@ func TestExecuteAndUnmarshal_Success(t *testing.T) {
 }
 
 func TestExecuteAndUnmarshal_GraphQLErrors(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data":null,"errors":[{"message":"boom"}]}`))
+		_, _ = w.Write([]byte(`{"data":null,"errors":[{"message":"boom"}]}`))
 	}))
 	defer srv.Close()
 
@@ -692,11 +692,11 @@ func TestFilterVars_Subset(t *testing.T) {
 		var req struct {
 			Variables map[string]any `json:"variables"`
 		}
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		// Echo the variables back as data so we can inspect them.
 		b, _ := json.Marshal(map[string]any{"data": req.Variables})
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(b)
+		_, _ = w.Write(b)
 	}))
 	defer srv.Close()
 
@@ -752,9 +752,9 @@ func TestExecuteAndUnmarshal_SingleFetch_EmptyData(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			body := body
 			srv := httptest.NewServer(
-				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 					w.Header().Set("Content-Type", "application/json")
-					w.Write([]byte(body))
+					_, _ = w.Write([]byte(body))
 				}),
 			)
 			defer srv.Close()
@@ -833,7 +833,7 @@ func TestExecuteAndUnmarshal_EntityFetch_SlowPath(t *testing.T) {
 	}))
 	defer sgA.Close()
 
-	sgB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sgB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		b, _ := json.Marshal(map[string]any{
 			"data": map[string]any{
 				"_entities": []any{
@@ -842,7 +842,7 @@ func TestExecuteAndUnmarshal_EntityFetch_SlowPath(t *testing.T) {
 			},
 		})
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(b)
+		_, _ = w.Write(b)
 	}))
 	defer sgB.Close()
 
@@ -950,11 +950,11 @@ func TestProjection_Gating(t *testing.T) {
 		// Entity server: returns empty _entities (entity fetch is a no-op here; we just
 		// need the slow path to be taken so execute() is called with skipProj=true).
 		entitySrv := httptest.NewServer(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
 				b, _ := json.Marshal(resp)
 				w.Header().Set("Content-Type", "application/json")
-				w.Write(b)
+				_, _ = w.Write(b)
 			}),
 		)
 		defer entitySrv.Close()
@@ -991,11 +991,11 @@ func TestProjection_Gating(t *testing.T) {
 	// so projection runs and planner-added fields are stripped from the output map.
 	t.Run("ExecuteAndUnmarshal_untyped_applies_projection", func(t *testing.T) {
 		entitySrv := httptest.NewServer(
-			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
 				b, _ := json.Marshal(resp)
 				w.Header().Set("Content-Type", "application/json")
-				w.Write(b)
+				_, _ = w.Write(b)
 			}),
 		)
 		defer entitySrv.Close()
@@ -1046,6 +1046,7 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 			merged: rawMerged{"id": mustRaw("p1"), "sku": mustRaw("s1")},
 			dest:   &Product{},
 			validate: func(t *testing.T, dest any) {
+				t.Helper()
 				p := dest.(*Product)
 				if p.ID != "p1" {
 					t.Errorf("ID: got %q, want p1", p.ID)
@@ -1059,6 +1060,7 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 			merged: rawMerged{"id": mustRaw("p1"), "unknown": mustRaw("x")},
 			dest:   &Product{},
 			validate: func(t *testing.T, dest any) {
+				t.Helper()
 				p := dest.(*Product)
 				if p.ID != "p1" {
 					t.Errorf("ID: got %q, want p1", p.ID)
@@ -1069,6 +1071,7 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 			merged: rawMerged{"id": mustRaw("p1")},
 			dest:   &Product{SKU: "preset"},
 			validate: func(t *testing.T, dest any) {
+				t.Helper()
 				p := dest.(*Product)
 				if p.SKU != "preset" {
 					t.Errorf("SKU should remain preset, got %q", p.SKU)
@@ -1081,6 +1084,7 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 				Ignored string `json:"-"`
 			}{},
 			validate: func(t *testing.T, dest any) {
+				t.Helper()
 				d := dest.(*struct {
 					Ignored string `json:"-"`
 				})
@@ -1093,6 +1097,7 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 			merged: rawMerged{"id": mustRaw("p1"), "sku": mustRaw("s1")},
 			dest:   new(any),
 			validate: func(t *testing.T, dest any) {
+				t.Helper()
 				m, ok := (*dest.(*any)).(map[string]any)
 				if !ok {
 					t.Fatalf("expected map[string]any, got %T", *dest.(*any))
@@ -1106,6 +1111,7 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 			merged: rawMerged{"id": mustRaw("p1")},
 			dest:   &map[string]any{},
 			validate: func(t *testing.T, dest any) {
+				t.Helper()
 				m := *dest.(*map[string]any)
 				if m["id"] != "p1" {
 					t.Errorf("id: got %v, want p1", m["id"])
@@ -1115,7 +1121,7 @@ func TestUnmarshalRawMergedInto(t *testing.T) {
 		"fallback_for_unknown_type": {
 			merged: rawMerged{"0": mustRaw("a"), "1": mustRaw("b")},
 			dest:   &[]string{},
-			validate: func(t *testing.T, dest any) {
+			validate: func(_ *testing.T, _ any) {
 				// fallback marshals merged (a JSON object) then unmarshals into []string,
 				// which will fail — so we just verify wantErr=true handles it.
 			},
@@ -1240,12 +1246,12 @@ func TestMarshalRawMergedDeterministic(t *testing.T) {
 	// Parse keys in order from result.
 	var ordered []string
 	dec := json.NewDecoder(strings.NewReader(string(b)))
-	dec.Token() // '{'
+	_, _ = dec.Token() // '{'
 	for dec.More() {
 		tok, _ := dec.Token()
 		key, _ := tok.(string)
 		ordered = append(ordered, key)
-		dec.Token() // skip value
+		_, _ = dec.Token() // skip value
 	}
 	sorted := make([]string, len(ordered))
 	copy(sorted, ordered)
@@ -1438,7 +1444,7 @@ func TestExecute_EntityFetch_IntermediateArray(t *testing.T) {
 
 	// Entity fetch: returns id for each course.
 	var entityCallCount int
-	sgB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	sgB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		entityCallCount++
 		resp := map[string]any{
 			"data": map[string]any{
@@ -1451,7 +1457,7 @@ func TestExecute_EntityFetch_IntermediateArray(t *testing.T) {
 		}
 		b, _ := json.Marshal(resp)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(b)
+		_, _ = w.Write(b)
 	}))
 	defer sgB.Close()
 

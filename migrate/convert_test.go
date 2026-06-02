@@ -54,21 +54,20 @@ func TestDefederatorYAML_WithBindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// DateTime kept as time.Time (in keepBindingType).
+	// All bindings pass through verbatim — defederator generate runs inside the
+	// webapp module so package paths like civil.Date resolve correctly.
 	if !strings.Contains(got, "DateTime:\n    type: time.Time") {
 		t.Errorf("DateTime should remain time.Time\noutput:\n%s", got)
 	}
-	// Date replaced with graphql.String (civil.Date is outside the module).
-	if !strings.Contains(got, "Date:\n    type: github.com/99designs/gqlgen/graphql.String") {
-		t.Errorf("Date should become graphql.String\noutput:\n%s", got)
+	if !strings.Contains(got, "Date:\n    type: cloud.google.com/go/civil.Date") {
+		t.Errorf("Date should remain civil.Date\noutput:\n%s", got)
 	}
-	// KALocale (plain string) replaced with graphql.String.
-	if !strings.Contains(got, "KALocale:\n    type: github.com/99designs/gqlgen/graphql.String") {
-		t.Errorf("KALocale should become graphql.String\noutput:\n%s", got)
+	if !strings.Contains(got, "KALocale:\n    type: string") {
+		t.Errorf("KALocale should remain string\noutput:\n%s", got)
 	}
-	// ENUM comment always present.
-	if !strings.Contains(got, "ENUM types are NOT bound here") {
-		t.Error("output missing ENUM comment")
+	// Enum auto-emit comment always present.
+	if !strings.Contains(got, "Enums are auto-emitted as typed Go strings") {
+		t.Errorf("output missing enum auto-emit comment\noutput:\n%s", got)
 	}
 }
 

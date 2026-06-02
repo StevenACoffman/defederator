@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -111,6 +112,58 @@ package: gqpkg
 	}
 	if cfg.Schema != "def.graphql" {
 		t.Errorf("expected defederator config to win, got schema=%q", cfg.Schema)
+	}
+}
+
+func TestValidate_RejectsMissingFields(t *testing.T) {
+	cases := map[string]struct {
+		cfg     Config
+		wantSub string // substring expected in error
+	}{
+		"missing schema": {
+			cfg: Config{
+				Client: PackageConfig{Filename: "c.go", Package: "x"},
+			},
+			wantSub: `"schema"`,
+		},
+		"missing client.filename": {
+			cfg: Config{
+				Schema: "sg.graphql",
+				Client: PackageConfig{Package: "x"},
+			},
+			wantSub: `"client.filename"`,
+		},
+		"missing client.package": {
+			cfg: Config{
+				Schema: "sg.graphql",
+				Client: PackageConfig{Filename: "c.go"},
+			},
+			wantSub: `"client.package"`,
+		},
+		"all set": {
+			cfg: Config{
+				Schema: "sg.graphql",
+				Client: PackageConfig{Filename: "c.go", Package: "x"},
+			},
+			wantSub: "",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.wantSub == "" {
+				if err != nil {
+					t.Errorf("expected nil, got %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantSub)
+			}
+			if !strings.Contains(err.Error(), tc.wantSub) {
+				t.Errorf("error %q does not contain %q", err.Error(), tc.wantSub)
+			}
+		})
 	}
 }
 

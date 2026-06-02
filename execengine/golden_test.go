@@ -159,7 +159,7 @@ func subgraphFromFilename(fname string) string {
 	base := strings.TrimSuffix(fname, ".json")
 	if idx := strings.LastIndex(base, "_"); idx >= 0 {
 		suffix := base[idx+1:]
-		allDigits := len(suffix) > 0
+		allDigits := suffix != ""
 		for _, c := range suffix {
 			if c < '0' || c > '9' {
 				allDigits = false
@@ -208,7 +208,7 @@ func scriptedServer(t *testing.T, calls []scriptedCall) *httptest.Server {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(call.response)
+		_, _ = w.Write(call.response)
 	}))
 }
 

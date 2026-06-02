@@ -1,3 +1,6 @@
+// Package migrate generates a .defederator.yml plus a stub cross_service/client.go
+// from an existing genqlient.yaml, so a service can switch from genqlient to
+// defederator with minimal manual edits.
 package migrate
 
 import (
@@ -21,7 +24,8 @@ type Data struct {
 	ImportAlias     string          // always "defed"
 	DefedImportPath string          // e.g. "github.com/Khan/webapp/services/ai-guide/generated/defederator"
 	URLFuncName     string          // e.g. "aiGuideSubgraphURLs"
-	Subgraphs       []SubgraphEntry // all join__Graph entries in declaration order
+	Subgraphs       []SubgraphEntry // join__Graph entries the service touches
+	AuthFlavors     AuthFlavors     // which factory shape to emit
 }
 
 // Render executes the embedded client.gotpl template and returns Go source. Pure.
@@ -38,8 +42,14 @@ func Render(d Data) (string, error) {
 }
 
 // DataFromDir derives template Data from the service directory path, the webapp
-// module path (from go.mod), and the parsed subgraphs. Pure function — no I/O.
-func DataFromDir(dir string, modulePath string, subgraphs []SubgraphEntry) Data {
+// module path (from go.mod), the (already-pruned) subgraph list, and the
+// detected auth flavors. Pure function — no I/O.
+func DataFromDir(
+	dir string,
+	modulePath string,
+	subgraphs []SubgraphEntry,
+	flavors AuthFlavors,
+) Data {
 	serviceName := filepath.Base(dir)
 	return Data{
 		ServiceName:     serviceName,
@@ -49,6 +59,7 @@ func DataFromDir(dir string, modulePath string, subgraphs []SubgraphEntry) Data 
 		DefedImportPath: modulePath + "/services/" + serviceName + "/generated/defederator",
 		URLFuncName:     urlFuncName(serviceName),
 		Subgraphs:       subgraphs,
+		AuthFlavors:     flavors,
 	}
 }
 

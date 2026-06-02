@@ -9,15 +9,12 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-var (
-	defederatorFilenames = []string{".defederator.yml", "defederator.yml", "defederator.yaml"}
-	genqlientFilenames   = []string{
-		"genqlient.yaml",
-		"genqlient.yml",
-		".genqlient.yaml",
-		".genqlient.yml",
-	}
-)
+var genqlientFilenames = []string{
+	"genqlient.yaml",
+	"genqlient.yml",
+	".genqlient.yaml",
+	".genqlient.yml",
+}
 
 // defaultFilenames is searched in order; defederator files take precedence.
 var defaultFilenames = []string{
@@ -86,6 +83,10 @@ type Config struct {
 
 	// Dir is the base directory for resolving relative paths (not serialised).
 	Dir string `yaml:"-"`
+
+	// Verbose enables per-file / per-operation progress diagnostics on stderr
+	// during generation. Set by the CLI's --verbose flag; not serialised.
+	Verbose bool `yaml:"-"`
 }
 
 // IsDefined returns true if both Filename and Package are set.
@@ -105,19 +106,58 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parse %s: %w", path, err)
 	}
 	cfg.Dir = filepath.Dir(path)
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("config: %s: %w", path, err)
+	}
 	return &cfg, nil
+}
+
+// Validate reports problems that would otherwise surface as obscure failures
+// further down the pipeline. The check set intentionally errs on the side of
+// "fail loudly at load time" — every condition here has previously caused a
+// confusing downstream symptom.
+func (c *Config) Validate() error {
+	if c.Schema == "" {
+		return errMissingField("schema")
+	}
+	if c.Client.Filename == "" {
+		return errMissingField("client.filename")
+	}
+	// An empty Client.Package makes the generator emit `package` with no name,
+	// which fails gofmt with hundreds of follow-on errors that hide the real
+	// cause. Catch it here while the user still has the config in their head.
+	if c.Client.Package == "" {
+		return errMissingField("client.package")
+	}
+	return nil
+}
+
+// errMissingField returns a consistent error message for a required config
+// field, including the YAML path so the user can find it.
+func errMissingField(yamlPath string) error {
+	return fmt.Errorf("missing required field %q", yamlPath)
 }
 
 // LoadConfigFromDir searches dir and its parents for a config file.
 // Defederator files take precedence over genqlient files. When a genqlient
 // config is found, LoadGenqlientConfig is used so the field mapping is correct.
+//
+// In both cases the returned Config is validated — callers can rely on
+// Schema, Client.Filename, and Client.Package all being non-empty.
 func LoadConfigFromDir(dir string) (*Config, error) {
 	path, err := findConfig(dir)
 	if err != nil {
 		return nil, fmt.Errorf("config: no config file found in %s or its parents: %w", dir, err)
 	}
 	if isGenqlientFilename(filepath.Base(path)) {
-		return LoadGenqlientConfig(path)
+		cfg, err := LoadGenqlientConfig(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := cfg.Validate(); err != nil {
+			return nil, fmt.Errorf("config: %s (genqlient fallback): %w", path, err)
+		}
+		return cfg, nil
 	}
 	return LoadConfig(path)
 }

@@ -26,10 +26,10 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 		// GraphQL spec §7.1: servers MAY use HTTP status codes for non-data responses,
 		// but a valid GraphQL body must still be parsed regardless of status.
 		"http_200_with_errors": {
-			handler: func(t *testing.T) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
+			handler: func(_ *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
 					w.WriteHeader(http.StatusOK)
-					w.Write([]byte(`{"data":null,"errors":[{"message":"not found"}]}`))
+					_, _ = w.Write([]byte(`{"data":null,"errors":[{"message":"not found"}]}`))
 				}
 			},
 			wantTransErr: false,
@@ -37,18 +37,20 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 		},
 		// Body is not JSON at all — must return a transport/decode error.
 		"malformed_json": {
-			handler: func(t *testing.T) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					w.Write([]byte(`not-valid-json`))
+			handler: func(_ *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte(`not-valid-json`))
 				}
 			},
 			wantTransErr: true,
 		},
 		// data:null with errors — errors must be propagated, no panic.
 		"data_null_with_errors": {
-			handler: func(t *testing.T) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					w.Write([]byte(`{"data":null,"errors":[{"message":"upstream failure"}]}`))
+			handler: func(_ *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write(
+						[]byte(`{"data":null,"errors":[{"message":"upstream failure"}]}`),
+					)
 				}
 			},
 			wantTransErr: false,
@@ -56,9 +58,9 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 		},
 		// data:null with no errors — must return empty data without error.
 		"data_null_no_errors": {
-			handler: func(t *testing.T) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					w.Write([]byte(`{"data":null}`))
+			handler: func(_ *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte(`{"data":null}`))
 				}
 			},
 			wantTransErr: false,
@@ -66,9 +68,9 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 		},
 		// Empty data object — not an error, empty merged result.
 		"data_empty_object": {
-			handler: func(t *testing.T) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					w.Write([]byte(`{"data":{}}`))
+			handler: func(_ *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte(`{"data":{}}`))
 				}
 			},
 			wantTransErr: false,
@@ -78,9 +80,9 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 		// return a non-nil error containing "context". Uses a normal server that
 		// would succeed, so the error is unambiguously from context cancellation.
 		"context_precancelled": {
-			handler: func(t *testing.T) http.HandlerFunc {
-				return func(w http.ResponseWriter, r *http.Request) {
-					w.Write([]byte(`{"data":{}}`))
+			handler: func(_ *testing.T) http.HandlerFunc {
+				return func(w http.ResponseWriter, _ *http.Request) {
+					_, _ = w.Write([]byte(`{"data":{}}`))
 				}
 			},
 			wantTransErr: true,

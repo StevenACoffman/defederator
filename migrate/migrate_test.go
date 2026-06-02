@@ -133,12 +133,14 @@ func TestRun_ClientGoContent(t *testing.T) {
 		t.Fatalf("read client.go: %v", err)
 	}
 	content := string(data)
+	// The fixture has no operation files in cross_service/, so the pruned
+	// _subgraphServices map is empty. We assert structural correctness only;
+	// the per-service smoke tests cover the populated case end-to-end.
 	checks := []string{
 		"package cross_service",
 		"newFederationClient",
 		"exampleSubgraphURLs",
-		`"CONTENT": "content"`,
-		`"USERS": "users"`,
+		"_subgraphServices",
 		"errors.Wrap",
 		"DO NOT EDIT",
 	}

@@ -778,8 +778,8 @@ func (g *genGettersGenerator) genEntityFetchFunc(
 	planSpecs map[string]string,
 ) func(*clientgenv2.Operation) string {
 	respTypeByName := make(map[string]types.Type, len(operationResponses))
-	for _, or_ := range operationResponses {
-		respTypeByName[or_.Name] = or_.Type
+	for _, or := range operationResponses {
+		respTypeByName[or.Name] = or.Type
 	}
 	return func(op *clientgenv2.Operation) string {
 		specJSON := planSpecs[op.Name]

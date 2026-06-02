@@ -2,6 +2,7 @@ package generator
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,12 +14,15 @@ import (
 // Exact paths (no glob metacharacters) are included as-is without a filesystem
 // check. Glob patterns must match at least one file or an error is returned.
 // Duplicate paths across patterns are collapsed to one entry.
-func expandGlobs(patterns []string, baseDir string) ([]string, error) {
+//
+// Per-pattern and per-match progress lines are written to log. Pass io.Discard
+// for silence.
+func expandGlobs(patterns []string, baseDir string, log io.Writer) ([]string, error) {
 	seen := make(map[string]struct{})
 	var result []string
 
 	for _, pattern := range patterns {
-		fmt.Printf("Expanding pattern: %s (baseDir: %s)\n", pattern, baseDir)
+		_, _ = fmt.Fprintf(log, "Expanding pattern: %s (baseDir: %s)\n", pattern, baseDir)
 		if !filepath.IsAbs(pattern) {
 			pattern = filepath.Join(baseDir, pattern)
 		}
@@ -37,14 +41,14 @@ func expandGlobs(patterns []string, baseDir string) ([]string, error) {
 		base, pat := doublestar.SplitPattern(pattern)
 		matches, err := doublestar.Glob(os.DirFS(base), pat, doublestar.WithFilesOnly())
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("glob %q: %w", pattern, err)
 		}
 		if len(matches) == 0 {
 			return nil, fmt.Errorf("glob %q did not match any files", filepath.FromSlash(pattern))
 		}
 		for _, m := range matches {
 			abs := filepath.Join(base, m)
-			fmt.Printf("Matched: %s\n", abs)
+			_, _ = fmt.Fprintf(log, "Matched: %s\n", abs)
 			if _, exists := seen[abs]; !exists {
 				seen[abs] = struct{}{}
 				result = append(result, abs)

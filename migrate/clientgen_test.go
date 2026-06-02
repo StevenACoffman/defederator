@@ -108,7 +108,12 @@ func TestURLFuncName(t *testing.T) {
 }
 
 func TestDataFromDir(t *testing.T) {
-	d := DataFromDir("/srv/webapp/services/ai-guide", "github.com/Khan/webapp", testSubgraphs)
+	d := DataFromDir(
+		"/srv/webapp/services/ai-guide",
+		"github.com/Khan/webapp",
+		testSubgraphs,
+		AuthFlavors{},
+	)
 	if d.ServiceName != "ai-guide" {
 		t.Errorf("ServiceName = %q, want %q", d.ServiceName, "ai-guide")
 	}

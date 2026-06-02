@@ -9,13 +9,35 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/vektah/gqlparser/v2"
+	"github.com/vektah/gqlparser/v2/ast"
+
 	"github.com/StevenACoffman/defederator/config"
+	"github.com/StevenACoffman/gorouter/federation"
 )
 
 // Options configures a migration run.
 type Options struct {
 	Force  bool // overwrite existing .defederator.yml and client.go
 	DryRun bool // print what would be written; write nothing
+	// SkipNextSteps suppresses the post-migration instruction block. Set when
+	// the caller is going to chain into another step (e.g. generate) that
+	// makes the printed advice misleading.
+	SkipNextSteps bool
+}
+
+// migrationInputs is everything generateFiles needs, assembled by analyse().
+// Bundling lets Run remain a thin orchestration shell: analyse does the
+// I/O-and-detection legwork, generateFiles does the write.
+type migrationInputs struct {
+	abs              string
+	modulePath       string
+	gqCfg            GenqlientConfig
+	subgraphs        []SubgraphEntry
+	sdl              []byte
+	schema           *ast.Schema
+	operationSources []*ast.Source
+	authFlavors      AuthFlavors
 }
 
 // Run migrates a genqlient-based service directory to defederator.
@@ -23,54 +45,107 @@ type Options struct {
 // Files are not overwritten unless opts.Force is true.
 // With opts.DryRun, files are printed to stdout and not written.
 func Run(_ context.Context, dir string, opts Options) error {
-	abs, err := filepath.Abs(dir)
+	in, err := analyse(dir)
 	if err != nil {
-		return fmt.Errorf("migrate: resolve dir %q: %w", dir, err)
+		return err
 	}
-	gqPath, err := findGenqlientConfig(abs)
-	if err != nil {
+	if err := generateFiles(
+		in.abs, in.modulePath, in.gqCfg, in.subgraphs, in.sdl,
+		in.schema, in.operationSources, in.authFlavors, opts,
+	); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	gqCfg, err := loadGenqlientConfig(gqPath)
-	if err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	subgraphs, sdl, err := loadSubgraphs(abs, gqCfg.Schema)
-	if err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	modulePath, err := findModulePath(abs)
-	if err != nil {
-		modulePath = "github.com/Khan/webapp"
-		_, _ = fmt.Fprintf(
-			os.Stderr,
-			"migrate: warning: could not find go.mod (%v); defaulting module path to %q\n",
-			err,
-			modulePath,
-		)
-	}
-	if err := generateFiles(abs, modulePath, gqCfg, subgraphs, sdl, opts); err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	if !opts.DryRun {
-		printNextSteps(abs)
+	if !opts.DryRun && !opts.SkipNextSteps {
+		printNextSteps(in.abs)
 	}
 	return nil
 }
 
+// analyse loads everything migrate needs to decide what to write — config,
+// supergraph SDL, operation sources, detected auth flavors, the pruned
+// subgraph list — and returns it as a single value. Returns a wrapped error
+// for any I/O or parse failure; the missing-go.mod case is non-fatal and
+// surfaces only as a stderr warning.
+func analyse(dir string) (*migrationInputs, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: resolve dir %q: %w", dir, err)
+	}
+	gqPath, err := findGenqlientConfig(abs)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	gqCfg, err := loadGenqlientConfig(gqPath)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	subgraphs, sdl, schema, err := loadSubgraphs(abs, gqCfg.Schema)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	sg, err := federation.ParseSchema(string(sdl))
+	if err != nil {
+		return nil, fmt.Errorf("migrate: parse supergraph for planning: %w", err)
+	}
+	operationSources, err := LoadOperationSources(gqCfg.Operations, abs)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	subgraphs = FilterSubgraphs(
+		subgraphs, UsedSubgraphs(sg, operationSources), serviceNameFromDir(abs),
+	)
+	authFlavors, err := AuthFlavorsFromOperationDir(filepath.Join(abs, "cross_service"))
+	if err != nil {
+		return nil, fmt.Errorf("migrate: detect auth flavors: %w", err)
+	}
+	return &migrationInputs{
+		abs:              abs,
+		modulePath:       resolveModulePath(abs),
+		gqCfg:            gqCfg,
+		subgraphs:        subgraphs,
+		sdl:              sdl,
+		schema:           schema,
+		operationSources: operationSources,
+		authFlavors:      authFlavors,
+	}, nil
+}
+
+// resolveModulePath returns the go.mod module path for the project containing
+// abs, or the conventional webapp default with a stderr warning when no go.mod
+// is found. Missing go.mod is non-fatal because migrate is sometimes run in
+// isolated fixture trees during development.
+func resolveModulePath(abs string) string {
+	modulePath, err := findModulePath(abs)
+	if err == nil {
+		return modulePath
+	}
+	const fallback = "github.com/Khan/webapp"
+	_, _ = fmt.Fprintf(
+		os.Stderr,
+		"migrate: warning: could not find go.mod (%v); defaulting module path to %q\n",
+		err, fallback,
+	)
+	return fallback
+}
+
 // loadSubgraphs reads the supergraph SDL at the given schema path (relative to abs)
-// and returns the parsed subgraph entries and raw SDL bytes.
-func loadSubgraphs(abs, schema string) ([]SubgraphEntry, []byte, error) {
-	schemaPath := filepath.Join(abs, schema)
+// and returns the parsed subgraph entries, raw SDL bytes, and a parsed *ast.Schema
+// for downstream type lookups.
+func loadSubgraphs(abs, schemaRel string) ([]SubgraphEntry, []byte, *ast.Schema, error) {
+	schemaPath := filepath.Join(abs, schemaRel)
 	sdl, err := os.ReadFile(schemaPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read supergraph schema %s: %w", schemaPath, err)
+		return nil, nil, nil, fmt.Errorf("read supergraph schema %s: %w", schemaPath, err)
 	}
 	entries, err := ParseSubgraphs(string(sdl))
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	return entries, sdl, nil
+	schema, err := gqlparser.LoadSchema(&ast.Source{Name: schemaPath, Input: string(sdl)})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load schema %s: %w", schemaPath, err)
+	}
+	return entries, sdl, schema, nil
 }
 
 // generateFiles writes .defederator.yml and cross_service/client.go.
@@ -79,6 +154,9 @@ func generateFiles(
 	gqCfg GenqlientConfig,
 	subgraphs []SubgraphEntry,
 	sdl []byte,
+	schema *ast.Schema,
+	operationSources []*ast.Source,
+	authFlavors AuthFlavors,
 	opts Options,
 ) error {
 	serviceName := filepath.Base(abs)
@@ -93,7 +171,16 @@ func generateFiles(
 			break
 		}
 	}
-	inputObjects, _ := ParseInputObjectsForService(string(sdl), serviceEnumName)
+	ownedInputObjects, _ := ParseInputObjectsForService(string(sdl), serviceEnumName)
+
+	// Prune to the intersection: only bind INPUT_OBJECTs that this service owns
+	// AND that appear as variables in at least one operation. Anything else
+	// would be a binding for a type no operation passes as an argument.
+	usedInputObjects, err := OperationVariableInputObjects(schema, operationSources)
+	if err != nil {
+		return fmt.Errorf("collect operation input objects: %w", err)
+	}
+	inputObjects := intersectSorted(ownedInputObjects, usedInputObjects)
 
 	in := YAMLInput{
 		Genqlient:    gqCfg,
@@ -104,10 +191,14 @@ func generateFiles(
 	if err != nil {
 		return fmt.Errorf("generate .defederator.yml: %w", err)
 	}
-	if err := writeFile(filepath.Join(abs, ".defederator.yml"), []byte(defedYAML), opts); err != nil {
+	if err := writeFile(
+		filepath.Join(abs, ".defederator.yml"),
+		[]byte(defedYAML),
+		opts,
+	); err != nil {
 		return fmt.Errorf("write .defederator.yml: %w", err)
 	}
-	data := DataFromDir(abs, modulePath, subgraphs)
+	data := DataFromDir(abs, modulePath, subgraphs, authFlavors)
 	clientSrc, err := Render(data)
 	if err != nil {
 		return err
