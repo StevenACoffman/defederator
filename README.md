@@ -120,6 +120,13 @@ defederator/
 │   ├── goextract.go        # Extracts # @genqlient-annotated queries from Go literals
 │   ├── export.go           # Writes JSON manifest of generated operations
 │   └── *_test.go           # Unit + codegen compile tests for all 5 scenarios
+├── migrate/                # defederator migrate subcommand
+│   ├── migrate.go          # CLI entry point; orchestrates file generation
+│   ├── convert.go          # DefederatorYAML: genqlient.yaml → .defederator.yml text
+│   ├── subgraphs.go        # ParseSubgraphs, ParseInputObjectsForService
+│   ├── clientgen.go        # Render: Data → cross_service/client.go text
+│   ├── client.gotpl        # Go template for the client scaffold
+│   └── *_test.go           # Unit tests + golden file for client scaffold
 ├── federationclient/       # Legacy runtime package (kept for graphqlcompat)
 ├── graphqlcompat/
 │   ├── client.go           # genqlient graphql.Client adapter
@@ -267,7 +274,44 @@ err = generator.Generate(ctx, cfg,
 )
 ```
 
-## Migration from genqlient
+## `defederator migrate` — scaffold from genqlient.yaml
+
+`defederator migrate` reads an existing `genqlient.yaml` and the Federation v2 supergraph SDL to generate two files that bootstrap defederator adoption for a service:
+
+- **`.defederator.yml`** — native defederator config derived from `genqlient.yaml`, with scalar bindings substituted for `graphql.String` and INPUT_OBJECT bindings for types owned by this subgraph.
+- **`cross_service/client.go`** — Go scaffold with a `newFederationClient` constructor and a `<service>SubgraphURLs` helper wired to service discovery.
+
+```sh
+# Preview without writing
+defederator migrate --dry-run ./services/districts
+
+# Write (skips existing files)
+defederator migrate ./services/districts
+
+# Overwrite existing files
+defederator migrate --force ./services/districts
+```
+
+The tool reads the supergraph SDL from the path in `genqlient.yaml`'s `schema:` field, so no extra flags are needed when the schema path is `../../gengraphql/composed_schema.graphql` (the webapp convention).
+
+### Flags
+
+| Flag | Description |
+|---|---|
+| `--dry-run` | Print generated content to stdout; write nothing |
+| `--force` | Overwrite existing `.defederator.yml` and `cross_service/client.go` |
+
+### What migrate leaves incomplete
+
+- **Subgraph list** — `_subgraphServices` in the generated client lists every subgraph in the supergraph. Prune it to only those this service's operations actually touch.
+- **Auth factory pattern** — services that issue federation calls under multiple auth roles (user / admin / locale) need separate constructor variants. The tool generates a single `newFederationClient(ctx _federationCtx)`.
+- **INPUT_OBJECT bindings** — may include types owned by this subgraph that no operation actually passes as arguments. Remove unused ones after confirming compilation.
+- **Scalar bindings** — non-standard scalars are bound to `graphql.String` as a placeholder. Replace with the real Go type if the field is read by your code.
+- **Code generation** — migrate only writes config and scaffold. Run `defederator` in the service directory afterward to generate the typed client and execution engine.
+
+For step-by-step instructions covering all 31 webapp services, see [migrate_webapp.md](migrate_webapp.md).
+
+## Migration from genqlient (graphqlcompat adapter)
 
 If you have an existing genqlient project, `graphqlcompat.NewClient` provides a drop-in adapter that implements genqlient's `graphql.Client` interface backed by the federation-aware execution engine.
 

@@ -32,6 +32,7 @@ package cross_service
 import (
 	"context"
 	"net/http"
+	"net/url"
 
 	"github.com/Khan/webapp/pkg/lib/errors"
 	"github.com/Khan/webapp/pkg/lib/httpctx"
@@ -85,8 +86,11 @@ func exampleSubgraphURLs(ctx context.Context, sd service_discovery.Client) (map[
 		if err != nil {
 			return nil, errors.Wrap(err, "enumName", enumName, "svcName", svcName)
 		}
-		u.Path = "/backend-graphql/"
-		urls[enumName] = u.String()
+		urls[enumName] = (&url.URL{
+			Scheme: u.Scheme,
+			Host:   u.Host,
+			Path:   "/backend-graphql/",
+		}).String()
 	}
 	return urls, nil
 }

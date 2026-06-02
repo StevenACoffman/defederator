@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
 	"github.com/gqlgo/gqlgenc/clientgenv2"
@@ -57,28 +58,70 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: init gqlgen config: %w", err)
 	}
 
-	// Map user-defined types that lack an explicit binding to graphql.String.
-	// gqlgenc calls Type(name) for any field where IsBasicType() returns true —
-	// this includes enums (no sub-selections) and input types (used as arguments).
-	// gqlgen's Init() adds introspection enums but leaves user-defined enums and
-	// input objects unmapped when no server model file is generated.
-	// Mapping them to string lets the generated client compile; the actual wire
-	// representation is handled by the JSON marshaler in the operation methods.
+	// Map user-defined types that lack an explicit binding so source_generator
+	// can resolve them.
+	//
+	// - INPUT_OBJECT types are mapped to graphql.String. The generated client
+	//   serializes input objects via the JSON marshaler in each operation method,
+	//   so the Go-side representation can be opaque.
+	// - ENUM types are registered as named string types in the client package
+	//   itself. The template (see template.gotpl) emits a Go `type T string` plus
+	//   typed `const ( … )` constants, matching genqlient's enum output. The
+	//   binder's package-load fallback (source_generator.go's syntheticNamedType)
+	//   handles the fact that the package being generated isn't on disk yet.
+	//
+	// gqlgenc calls Type(name) for any field where IsBasicType() returns true,
+	// which covers both enums (no sub-selections) and input types (used as args).
+	// gqlgen's Init() registers introspection enums but leaves user-defined enums
+	// and input objects unmapped when no server model file is generated.
+	clientPkg := gqlgenConfig.PackageConfig{
+		Filename: cfg.ClientFilename(),
+		Package:  cfg.Client.Package,
+	}
+	clientImportPath := clientPkg.ImportPath()
+
 	if gqlgencCfg.GQLConfig.Models == nil {
 		gqlgencCfg.GQLConfig.Models = make(gqlgenConfig.TypeMap)
 	}
+	var enums []*EnumDef
 	for name, def := range gqlgencCfg.GQLConfig.Schema.Types {
 		switch def.Kind {
-		case "INPUT_OBJECT": // We still map input objects to string for now?
-		default:
-			continue
-		}
-		if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
-			gqlgencCfg.GQLConfig.Models[name] = gqlgenConfig.TypeMapEntry{
-				Model: gqlgenConfig.StringList{"github.com/99designs/gqlgen/graphql.String"},
+		case ast.InputObject:
+			if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
+				gqlgencCfg.GQLConfig.Models[name] = gqlgenConfig.TypeMapEntry{
+					Model: gqlgenConfig.StringList{"github.com/99designs/gqlgen/graphql.String"},
+				}
+			}
+		case ast.Enum:
+			if strings.HasPrefix(name, "__") {
+				// Skip introspection enums; gqlgen already registers them.
+				continue
+			}
+			enum := &EnumDef{
+				GoName:      name,
+				GraphQLName: name,
+				Description: def.Description,
+			}
+			for _, v := range def.EnumValues {
+				enum.Values = append(enum.Values, EnumValueDef{
+					GoName:      name + GoConstName(v.Name),
+					GraphQLName: v.Name,
+					Description: v.Description,
+				})
+			}
+			sort.Slice(enum.Values, func(i, j int) bool {
+				return enum.Values[i].GraphQLName < enum.Values[j].GraphQLName
+			})
+			enums = append(enums, enum)
+
+			if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
+				gqlgencCfg.GQLConfig.Models[name] = gqlgenConfig.TypeMapEntry{
+					Model: gqlgenConfig.StringList{clientImportPath + "." + name},
+				}
 			}
 		}
 	}
+	sort.Slice(enums, func(i, j int) bool { return enums[i].GoName < enums[j].GoName })
 
 	// Schema.Implements iteration order is non-deterministic; sort for stable output.
 	for _, v := range gqlgencCfg.GQLConfig.Schema.Implements {
@@ -127,11 +170,6 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	)
 	if err != nil {
 		return fmt.Errorf("generate: build per-operation documents: %w", err)
-	}
-
-	clientPkg := gqlgenConfig.PackageConfig{
-		Filename: cfg.ClientFilename(),
-		Package:  cfg.Client.Package,
 	}
 
 	generateCfg := buildGenerateConfig(cfg)
@@ -196,6 +234,7 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		clientPkg,
 		planSpecs,
 		urlMode,
+		enums,
 	); err != nil {
 		return fmt.Errorf("generate: render template: %w", err)
 	}

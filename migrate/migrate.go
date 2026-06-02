@@ -35,7 +35,7 @@ func Run(_ context.Context, dir string, opts Options) error {
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	subgraphs, err := loadSubgraphs(abs, gqCfg.Schema)
+	subgraphs, sdl, err := loadSubgraphs(abs, gqCfg.Schema)
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
@@ -49,7 +49,7 @@ func Run(_ context.Context, dir string, opts Options) error {
 			modulePath,
 		)
 	}
-	if err := generateFiles(abs, modulePath, gqCfg, subgraphs, opts); err != nil {
+	if err := generateFiles(abs, modulePath, gqCfg, subgraphs, sdl, opts); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	if !opts.DryRun {
@@ -59,14 +59,18 @@ func Run(_ context.Context, dir string, opts Options) error {
 }
 
 // loadSubgraphs reads the supergraph SDL at the given schema path (relative to abs)
-// and returns the parsed subgraph entries.
-func loadSubgraphs(abs, schema string) ([]SubgraphEntry, error) {
+// and returns the parsed subgraph entries and raw SDL bytes.
+func loadSubgraphs(abs, schema string) ([]SubgraphEntry, []byte, error) {
 	schemaPath := filepath.Join(abs, schema)
 	sdl, err := os.ReadFile(schemaPath)
 	if err != nil {
-		return nil, fmt.Errorf("read supergraph schema %s: %w", schemaPath, err)
+		return nil, nil, fmt.Errorf("read supergraph schema %s: %w", schemaPath, err)
 	}
-	return ParseSubgraphs(string(sdl))
+	entries, err := ParseSubgraphs(string(sdl))
+	if err != nil {
+		return nil, nil, err
+	}
+	return entries, sdl, nil
 }
 
 // generateFiles writes .defederator.yml and cross_service/client.go.
@@ -74,9 +78,29 @@ func generateFiles(
 	abs, modulePath string,
 	gqCfg GenqlientConfig,
 	subgraphs []SubgraphEntry,
+	sdl []byte,
 	opts Options,
 ) error {
-	defedYAML, err := DefederatorYAML(gqCfg)
+	serviceName := filepath.Base(abs)
+	genqlientPkg := modulePath + "/services/" + serviceName + "/generated/genqlient"
+
+	// Find the join__Graph enum name for this service so we can filter INPUT_OBJECTs
+	// to only those owned by this subgraph (via @join__type(graph:) directives).
+	var serviceEnumName string
+	for _, sg := range subgraphs {
+		if sg.ServiceName == serviceName {
+			serviceEnumName = sg.EnumName
+			break
+		}
+	}
+	inputObjects, _ := ParseInputObjectsForService(string(sdl), serviceEnumName)
+
+	in := YAMLInput{
+		Genqlient:    gqCfg,
+		InputObjects: inputObjects,
+		GenqlientPkg: genqlientPkg,
+	}
+	defedYAML, err := DefederatorYAML(in)
 	if err != nil {
 		return fmt.Errorf("generate .defederator.yml: %w", err)
 	}
@@ -140,7 +164,6 @@ func findGenqlientConfig(dir string) (string, error) {
 }
 
 // loadGenqlientConfig reads a genqlient.yaml and returns a GenqlientConfig.
-// It uses the defederator config package for YAML parsing.
 func loadGenqlientConfig(path string) (GenqlientConfig, error) {
 	cfg, err := config.LoadGenqlientConfig(path)
 	if err != nil {

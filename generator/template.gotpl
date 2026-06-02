@@ -112,6 +112,30 @@
 
 {{- end }}
 
+{{- range $enum := .Enum }}
+// {{ $enum.GoName }} is the GraphQL enum {{ $enum.GraphQLName }}.
+{{- if $enum.Description }}
+// {{ commentLine $enum.Description }}
+{{- end }}
+type {{ $enum.GoName }} string
+
+const (
+{{- range $val := $enum.Values }}
+{{- if $val.Description }}
+	// {{ $val.GoName }} is the GraphQL value {{ $val.GraphQLName }}. {{ commentLine $val.Description }}
+{{- end }}
+	{{ $val.GoName }} {{ $enum.GoName }} = "{{ $val.GraphQLName }}"
+{{- end }}
+)
+
+// All{{ $enum.GoName }} lists every value of the {{ $enum.GraphQLName }} enum.
+var All{{ $enum.GoName }} = []{{ $enum.GoName }}{
+{{- range $val := $enum.Values }}
+	{{ $val.GoName }},
+{{- end }}
+}
+{{ end }}
+
 {{- range $name, $element := .Fragment }}
 	type  {{ .Name | go  }} {{ .Type | ref }}
 

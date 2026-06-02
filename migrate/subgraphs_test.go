@@ -6,12 +6,25 @@ import (
 
 const minimalSupergraph = `
 directive @join__graph(identifier: String!, url: String!) on ENUM_VALUE
+directive @join__type(graph: join__Graph!) repeatable on OBJECT | INTERFACE | UNION | ENUM | INPUT_OBJECT | SCALAR
 
 enum join__Graph {
   ADMIN @join__graph(identifier: "admin", url: "unused")
   AI_GUIDE @join__graph(identifier: "ai-guide", url: "unused")
   CONTENT_EDITING @join__graph(identifier: "content-editing", url: "unused")
   USERS @join__graph(identifier: "users", url: "unused")
+}
+
+input AdminOnlyInput @join__type(graph: ADMIN) {
+  id: String!
+}
+
+input SharedInput @join__type(graph: ADMIN) @join__type(graph: USERS) {
+  name: String!
+}
+
+input UsersInput @join__type(graph: USERS) {
+  email: String!
 }
 
 type Query {
@@ -84,5 +97,50 @@ func TestEnumToServiceName(t *testing.T) {
 		if got != want {
 			t.Errorf("enumToServiceName(%q) = %q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestParseInputObjectsForService(t *testing.T) {
+	cases := []struct {
+		name          string
+		graphEnumName string
+		want          []string
+	}{
+		{
+			name:          "admin inputs",
+			graphEnumName: "ADMIN",
+			want:          []string{"AdminOnlyInput", "SharedInput"},
+		},
+		{
+			name:          "users inputs",
+			graphEnumName: "USERS",
+			want:          []string{"SharedInput", "UsersInput"},
+		},
+		{
+			name:          "ai-guide has none",
+			graphEnumName: "AI_GUIDE",
+			want:          nil,
+		},
+		{
+			name:          "empty enum name returns nil",
+			graphEnumName: "",
+			want:          nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseInputObjectsForService(minimalSupergraph, tc.graphEnumName)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			for i, w := range tc.want {
+				if got[i] != w {
+					t.Errorf("[%d] got %q, want %q", i, got[i], w)
+				}
+			}
+		})
 	}
 }

@@ -38,7 +38,9 @@ func TestRender_ContainsExpected(t *testing.T) {
 		`"CONTENT": "content"`,
 		`"USERS": "users"`,
 		"errors.Wrap(err",
-		`u.Path = "/backend-graphql/"`,
+		`"net/url"`,
+		`(&url.URL{`,
+		`Path:   "/backend-graphql/"`,
 		"DO NOT EDIT",
 	}
 	for _, want := range checks {

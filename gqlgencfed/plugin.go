@@ -160,6 +160,7 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		p.client,
 		planSpecs,
 		"baked",
+		nil, // gqlgencfed callers register enum models via gqlgen config directly
 	); err != nil {
 		return fmt.Errorf("gqlgencfed: render template: %w", err)
 	}
