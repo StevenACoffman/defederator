@@ -14,11 +14,11 @@ import (
 	defed "github.com/Khan/webapp/services/example/generated/defederator"
 )
 
-// _federationCtx is the minimal context the per-request federation client needs:
+// federationCtx is the minimal context the per-request federation client needs:
 // HTTP transport from the request context and service discovery for subgraph URL
 // resolution. Use newFederationClient for handlers that propagate the caller's
 // auth via the incoming HTTP transport.
-type _federationCtx interface {
+type federationCtx interface {
 	context.Context
 	web.ServiceVersionContext
 	httpctx.KAContext
@@ -27,7 +27,7 @@ type _federationCtx interface {
 
 // newFederationClient returns a FederationClient whose HTTP transport and subgraph
 // URLs are resolved fresh from ctx on every operation call.
-func newFederationClient(ctx _federationCtx) defed.FederationClient {
+func newFederationClient(ctx federationCtx) defed.FederationClient {
 	return defed.NewClientWithFactories(
 		func(callCtx context.Context) *http.Client {
 			if h, ok := callCtx.(httpctx.KAContext); ok {

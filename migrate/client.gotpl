@@ -17,11 +17,11 @@ import (
 	{{.ImportAlias}} "{{.DefedImportPath}}"
 )
 
-// _federationCtx is the minimal context the per-request federation client needs:
+// federationCtx is the minimal context the per-request federation client needs:
 // HTTP transport from the request context and service discovery for subgraph URL
 // resolution. Use newFederationClient for handlers that propagate the caller's
 // auth via the incoming HTTP transport.
-type _federationCtx interface {
+type federationCtx interface {
 	context.Context
 	web.ServiceVersionContext
 	httpctx.KAContext
@@ -30,7 +30,7 @@ type _federationCtx interface {
 
 // newFederationClient returns a FederationClient whose HTTP transport and subgraph
 // URLs are resolved fresh from ctx on every operation call.
-func newFederationClient(ctx _federationCtx) {{.ImportAlias}}.FederationClient {
+func newFederationClient(ctx federationCtx) {{.ImportAlias}}.FederationClient {
 	return {{.ImportAlias}}.NewClientWithFactories(
 		func(callCtx context.Context) *http.Client {
 			if h, ok := callCtx.(httpctx.KAContext); ok {
@@ -50,12 +50,12 @@ func newFederationClient(ctx _federationCtx) {{.ImportAlias}}.FederationClient {
 
 {{- if .AuthFlavors.Multi}}
 
-// _jobsCtx is the minimal context for service-admin / background and per-user
+// jobsCtx is the minimal context for service-admin / background and per-user
 // federation calls that pick an HTTP transport explicitly via gqlclient: GraphQL
 // (for HTTP-client selection) plus service discovery (for subgraph URL
 // resolution). Use the per-flavor constructors below in background jobs and
 // admin RPCs where the caller's identity doesn't ride on the request.
-type _jobsCtx interface {
+type jobsCtx interface {
 	context.Context
 	gqlclient.KAContext
 	service_discovery.KAContext
@@ -65,7 +65,7 @@ type _jobsCtx interface {
 
 // NewUserFederationClient returns a FederationClient authenticated as the
 // request user. Use for operations previously calling AsUser().
-func NewUserFederationClient(ctx _jobsCtx) {{.ImportAlias}}.FederationClient {
+func NewUserFederationClient(ctx jobsCtx) {{.ImportAlias}}.FederationClient {
 	return newJobFederationClient(
 		ctx.GraphQL().AsUser().HTTPClient(),
 		ctx.ServiceDiscovery(),
@@ -77,7 +77,7 @@ func NewUserFederationClient(ctx _jobsCtx) {{.ImportAlias}}.FederationClient {
 
 // NewAdminFederationClient returns a FederationClient authenticated as
 // service-admin. Use for operations previously calling AsServiceAdmin().
-func NewAdminFederationClient(ctx _jobsCtx) {{.ImportAlias}}.FederationClient {
+func NewAdminFederationClient(ctx jobsCtx) {{.ImportAlias}}.FederationClient {
 	return newJobFederationClient(
 		ctx.GraphQL().AsServiceAdmin().HTTPClient(),
 		ctx.ServiceDiscovery(),
@@ -90,7 +90,7 @@ func NewAdminFederationClient(ctx _jobsCtx) {{.ImportAlias}}.FederationClient {
 // newLocaleUserFederationClient returns a FederationClient with an explicit
 // KALocale header. Use for operations previously calling
 // WithKALocale(l).AsUser().
-func newLocaleUserFederationClient(ctx _jobsCtx, kaLocale string) {{.ImportAlias}}.FederationClient {
+func newLocaleUserFederationClient(ctx jobsCtx, kaLocale string) {{.ImportAlias}}.FederationClient {
 	return newJobFederationClient(
 		ctx.GraphQL().WithKALocale(kaLocale).AsUser().HTTPClient(),
 		ctx.ServiceDiscovery(),

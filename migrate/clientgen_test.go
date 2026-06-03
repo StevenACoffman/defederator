@@ -30,7 +30,7 @@ func TestRender_ContainsExpected(t *testing.T) {
 	checks := []string{
 		"package cross_service",
 		`defed "github.com/Khan/webapp/services/example/generated/defederator"`,
-		"_federationCtx",
+		"federationCtx",
 		"func newFederationClient(",
 		"defed.NewClientWithFactories(",
 		"defed.Resolve(specJSON, urls)",
