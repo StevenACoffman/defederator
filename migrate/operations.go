@@ -281,4 +281,3 @@ func FilterSubgraphs(
 // Centralized so the rule for deriving a service name from its path lives in
 // one place.
 func serviceNameFromDir(absDir string) string { return filepath.Base(absDir) }
-

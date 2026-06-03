@@ -99,4 +99,3 @@ func TestEnumToServiceName(t *testing.T) {
 		}
 	}
 }
-
