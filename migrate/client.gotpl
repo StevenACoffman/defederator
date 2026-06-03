@@ -8,22 +8,53 @@ import (
 	"net/url"
 
 	"github.com/Khan/webapp/pkg/lib/errors"
-{{- if .AuthFlavors.Multi}}
-	"github.com/Khan/webapp/pkg/lib/service_discovery"
-	"github.com/Khan/webapp/pkg/web/gqlclient"
-{{- else}}
 	"github.com/Khan/webapp/pkg/lib/httpctx"
 	"github.com/Khan/webapp/pkg/lib/service_discovery"
 	"github.com/Khan/webapp/pkg/web"
+{{- if .AuthFlavors.Multi}}
+	"github.com/Khan/webapp/pkg/web/gqlclient"
 {{- end}}
 	{{.ImportAlias}} "{{.DefedImportPath}}"
 )
 
+// _federationCtx is the minimal context the per-request federation client needs:
+// HTTP transport from the request context and service discovery for subgraph URL
+// resolution. Use newFederationClient for handlers that propagate the caller's
+// auth via the incoming HTTP transport.
+type _federationCtx interface {
+	context.Context
+	web.ServiceVersionContext
+	httpctx.KAContext
+	service_discovery.KAContext
+}
+
+// newFederationClient returns a FederationClient whose HTTP transport and subgraph
+// URLs are resolved fresh from ctx on every operation call.
+func newFederationClient(ctx _federationCtx) {{.ImportAlias}}.FederationClient {
+	return {{.ImportAlias}}.NewClientWithFactories(
+		func(callCtx context.Context) *http.Client {
+			if h, ok := callCtx.(httpctx.KAContext); ok {
+				return h.HTTP()
+			}
+			return http.DefaultClient
+		},
+		func(callCtx context.Context, specJSON string) (*{{.ImportAlias}}.Plan, error) {
+			urls, err := {{.URLFuncName}}(callCtx, ctx.ServiceDiscovery())
+			if err != nil {
+				return nil, err
+			}
+			return {{.ImportAlias}}.Resolve(specJSON, urls)
+		},
+	)
+}
+
 {{- if .AuthFlavors.Multi}}
 
 // _jobsCtx is the minimal context for service-admin / background and per-user
-// federation calls: GraphQL (for HTTP-client selection) plus service discovery
-// (for subgraph URL resolution).
+// federation calls that pick an HTTP transport explicitly via gqlclient: GraphQL
+// (for HTTP-client selection) plus service discovery (for subgraph URL
+// resolution). Use the per-flavor constructors below in background jobs and
+// admin RPCs where the caller's identity doesn't ride on the request.
 type _jobsCtx interface {
 	context.Context
 	gqlclient.KAContext
@@ -75,36 +106,6 @@ func newJobFederationClient(httpClient *http.Client, sd service_discovery.Client
 		func(_ context.Context) *http.Client { return httpClient },
 		func(callCtx context.Context, specJSON string) (*{{.ImportAlias}}.Plan, error) {
 			urls, err := {{.URLFuncName}}(callCtx, sd)
-			if err != nil {
-				return nil, err
-			}
-			return {{.ImportAlias}}.Resolve(specJSON, urls)
-		},
-	)
-}
-{{- else}}
-
-// _federationCtx is the minimal context the federation client needs:
-// per-request HTTP transport and service discovery for subgraph URL resolution.
-type _federationCtx interface {
-	context.Context
-	web.ServiceVersionContext
-	httpctx.KAContext
-	service_discovery.KAContext
-}
-
-// newFederationClient returns a FederationClient whose HTTP transport and subgraph
-// URLs are resolved fresh from ctx on every operation call.
-func newFederationClient(ctx _federationCtx) {{.ImportAlias}}.FederationClient {
-	return {{.ImportAlias}}.NewClientWithFactories(
-		func(callCtx context.Context) *http.Client {
-			if h, ok := callCtx.(httpctx.KAContext); ok {
-				return h.HTTP()
-			}
-			return http.DefaultClient
-		},
-		func(callCtx context.Context, specJSON string) (*{{.ImportAlias}}.Plan, error) {
-			urls, err := {{.URLFuncName}}(callCtx, ctx.ServiceDiscovery())
 			if err != nil {
 				return nil, err
 			}

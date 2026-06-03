@@ -21,7 +21,8 @@ type GenqlientConfig struct {
 // pure transformation.
 type YAMLInput struct {
 	Genqlient    GenqlientConfig
-	InputObjects []string // INPUT_OBJECT names from the supergraph SDL, sorted
+	InputObjects []string // INPUT_OBJECT names used by operations, sorted
+	Enums        []string // ENUM names used by operations, sorted
 	GenqlientPkg string   // e.g. "github.com/Khan/webapp/services/foo/generated/genqlient"
 }
 
@@ -76,7 +77,7 @@ func DefederatorYAML(in YAMLInput) (string, error) {
 	b.WriteString("  clientInterfaceName: FederationClient\n")
 	b.WriteString("  optional: pointer\n\n")
 
-	b.WriteString(bindingsSection(gq.Bindings, in.InputObjects, in.GenqlientPkg))
+	b.WriteString(bindingsSection(gq.Bindings, in.InputObjects, in.Enums, in.GenqlientPkg))
 
 	return b.String(), nil
 }
@@ -99,16 +100,17 @@ func defederatorClientFilename(genqlientGenerated string) string {
 }
 
 // bindingsSection renders the full bindings: block, including scalar bindings,
-// ENUM comment, and optionally INPUT_OBJECT bindings.
-// Returns an empty string when there are no bindings of any kind.
+// auto-generated INPUT_OBJECT and ENUM bindings that point at the corresponding
+// genqlient-generated Go types. Returns an empty string when no bindings exist.
 func bindingsSection(
 	bindings map[string]config.TypeBinding,
-	inputObjects []string,
+	inputObjects, enums []string,
 	genqlientPkg string,
 ) string {
 	hasScalars := len(bindings) > 0
 	hasInputObjects := len(inputObjects) > 0 && genqlientPkg != ""
-	if !hasScalars && !hasInputObjects {
+	hasEnums := len(enums) > 0 && genqlientPkg != ""
+	if !hasScalars && !hasInputObjects && !hasEnums {
 		return ""
 	}
 
@@ -116,63 +118,98 @@ func bindingsSection(
 	b.WriteString("bindings:\n")
 
 	if hasScalars {
-		b.WriteString(
-			"  # Scalars — copied verbatim from genqlient.yaml. Defederator generate runs\n",
-		)
-		b.WriteString(
-			"  # inside the webapp module so any github.com/Khan/... or stdlib type path\n",
-		)
-		b.WriteString("  # resolves correctly.\n")
-
-		keys := sortedKeys(bindings)
-		for _, k := range keys {
-			v := bindings[k]
-			b.WriteString("  ")
-			b.WriteString(k)
-			b.WriteString(":\n")
-			b.WriteString("    type: ")
-			b.WriteString(v.Type)
-			b.WriteString("\n")
-			if v.Marshaler != "" {
-				b.WriteString("    marshaler: ")
-				b.WriteString(v.Marshaler)
-				b.WriteString("\n")
-			}
-			if v.Unmarshaler != "" {
-				b.WriteString("    unmarshaler: ")
-				b.WriteString(v.Unmarshaler)
-				b.WriteString("\n")
-			}
-		}
+		writeScalarBindings(&b, bindings)
 	}
-
-	// ENUM comment — always emitted when there are any bindings. Reflects the
-	// generator's behaviour: enum types are auto-emitted as named Go strings
-	// (genqlient-style) in the client package and do not require a binding.
-	b.WriteString("  # Enums are auto-emitted as typed Go strings so no need to bind here unless\n")
-	b.WriteString("  # you need to override (e.g. to point at an existing Go type elsewhere).\n")
-
+	if hasEnums {
+		writeEnumBindings(&b, enums, genqlientPkg)
+	}
 	if hasInputObjects {
-		b.WriteString(
-			"  # INPUT_OBJECT bindings — keep genqlient types so callers don't need to change.\n",
-		)
-		b.WriteString(
-			"  # INPUT_OBJECTs only appear as operation inputs (never in response fields),\n",
-		)
-		b.WriteString("  # so gqlgenc won't try to resolve them as response types.\n")
-		for _, name := range inputObjects {
-			b.WriteString("  ")
-			b.WriteString(name)
-			b.WriteString(":\n")
-			b.WriteString("    type: ")
-			b.WriteString(genqlientPkg)
-			b.WriteString(".")
-			b.WriteString(name)
-			b.WriteString("\n")
-		}
+		writeInputObjectBindings(&b, inputObjects, genqlientPkg)
 	}
 
 	return b.String()
+}
+
+// writeScalarBindings emits the user-supplied scalar bindings copied verbatim
+// from genqlient.yaml.
+func writeScalarBindings(b *strings.Builder, bindings map[string]config.TypeBinding) {
+	b.WriteString(
+		"  # Scalars — copied verbatim from genqlient.yaml. Defederator generate runs\n",
+	)
+	b.WriteString(
+		"  # inside the webapp module so any github.com/Khan/... or stdlib type path\n",
+	)
+	b.WriteString("  # resolves correctly.\n")
+
+	for _, k := range sortedKeys(bindings) {
+		v := bindings[k]
+		b.WriteString("  ")
+		b.WriteString(k)
+		b.WriteString(":\n")
+		b.WriteString("    type: ")
+		b.WriteString(v.Type)
+		b.WriteString("\n")
+		if v.Marshaler != "" {
+			b.WriteString("    marshaler: ")
+			b.WriteString(v.Marshaler)
+			b.WriteString("\n")
+		}
+		if v.Unmarshaler != "" {
+			b.WriteString("    unmarshaler: ")
+			b.WriteString(v.Unmarshaler)
+			b.WriteString("\n")
+		}
+	}
+}
+
+// writeEnumBindings emits one binding per enum used by an operation, pointing
+// at the genqlient-emitted Go type. Aligning the two clients' enum types means
+// user wrappers can pass genqlient enum values directly into defederator
+// methods without per-call casts.
+func writeEnumBindings(b *strings.Builder, enums []string, genqlientPkg string) {
+	b.WriteString(
+		"  # ENUM bindings — point at the genqlient-generated Go types so the same\n",
+	)
+	b.WriteString(
+		"  # named-string values flow into both clients without casts. If you want\n",
+	)
+	b.WriteString(
+		"  # defederator to emit its own typed-string for an enum instead, delete the\n",
+	)
+	b.WriteString("  # corresponding line below.\n")
+	for _, name := range enums {
+		b.WriteString("  ")
+		b.WriteString(name)
+		b.WriteString(":\n")
+		b.WriteString("    type: ")
+		b.WriteString(genqlientPkg)
+		b.WriteString(".")
+		b.WriteString(name)
+		b.WriteString("\n")
+	}
+}
+
+// writeInputObjectBindings emits one binding per input object used by an
+// operation, pointing at the genqlient-emitted Go type so callers don't need
+// to translate between client packages.
+func writeInputObjectBindings(b *strings.Builder, inputObjects []string, genqlientPkg string) {
+	b.WriteString(
+		"  # INPUT_OBJECT bindings — keep genqlient types so callers don't need to change.\n",
+	)
+	b.WriteString(
+		"  # INPUT_OBJECTs only appear as operation inputs (never in response fields),\n",
+	)
+	b.WriteString("  # so gqlgenc won't try to resolve them as response types.\n")
+	for _, name := range inputObjects {
+		b.WriteString("  ")
+		b.WriteString(name)
+		b.WriteString(":\n")
+		b.WriteString("    type: ")
+		b.WriteString(genqlientPkg)
+		b.WriteString(".")
+		b.WriteString(name)
+		b.WriteString("\n")
+	}
 }
 
 // yamlSingleQuote wraps s in YAML single quotes, doubling any embedded single

@@ -14,8 +14,10 @@ import (
 	defed "github.com/Khan/webapp/services/example/generated/defederator"
 )
 
-// _federationCtx is the minimal context the federation client needs:
-// per-request HTTP transport and service discovery for subgraph URL resolution.
+// _federationCtx is the minimal context the per-request federation client needs:
+// HTTP transport from the request context and service discovery for subgraph URL
+// resolution. Use newFederationClient for handlers that propagate the caller's
+// auth via the incoming HTTP transport.
 type _federationCtx interface {
 	context.Context
 	web.ServiceVersionContext

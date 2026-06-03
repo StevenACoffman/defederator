@@ -3,7 +3,6 @@ package migrate
 import (
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 
 	"github.com/vektah/gqlparser/v2/ast"
@@ -42,40 +41,6 @@ func ParseSubgraphs(sdl string) ([]SubgraphEntry, error) {
 		return entries, nil
 	}
 	return nil, errors.New("migrate: join__Graph enum not found in supergraph SDL")
-}
-
-// ParseInputObjectsForService returns all INPUT_OBJECT type names from the supergraph
-// SDL that are owned by the given join__Graph enum value (e.g. "DISTRICTS"), sorted
-// alphabetically. Ownership is determined by the @join__type(graph:) directive.
-//
-// Returns nil if graphEnumName is empty. Pure function — no I/O.
-func ParseInputObjectsForService(sdl string, graphEnumName string) ([]string, error) {
-	if graphEnumName == "" {
-		return nil, nil
-	}
-	doc, err := parser.ParseSchema(&ast.Source{Input: sdl, Name: "supergraph"})
-	if err != nil {
-		return nil, fmt.Errorf("migrate: parse supergraph SDL for input objects: %w", err)
-	}
-	var names []string
-	for _, def := range doc.Definitions {
-		if def.Kind != ast.InputObject {
-			continue
-		}
-		for _, d := range def.Directives {
-			if d.Name != "join__type" {
-				continue
-			}
-			for _, arg := range d.Arguments {
-				if arg.Name == "graph" && arg.Value.Raw == graphEnumName {
-					names = append(names, def.Name)
-					break
-				}
-			}
-		}
-	}
-	sort.Strings(names)
-	return names, nil
 }
 
 // joinGraphIdentifier extracts the identifier string from a @join__graph directive

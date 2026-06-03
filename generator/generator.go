@@ -64,23 +64,9 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		return fmt.Errorf("generate: init gqlgen config: %w", err)
 	}
 
-	// Register model bindings for user-defined INPUT_OBJECT and ENUM types so
-	// gqlgenc's SourceGenerator.Type() can resolve them. See CollectEnums and
-	// BasicTypeModels for details. User-supplied bindings in cfg.Models always
-	// win; we only fill in unbound names.
 	clientPkg := gqlgenConfig.PackageConfig{
 		Filename: cfg.ClientFilename(),
 		Package:  cfg.Client.Package,
-	}
-	enums := CollectEnums(gqlgencCfg.GQLConfig.Schema)
-	basicModels := BasicTypeModels(gqlgencCfg.GQLConfig.Schema, clientPkg.ImportPath())
-	if gqlgencCfg.GQLConfig.Models == nil {
-		gqlgencCfg.GQLConfig.Models = make(gqlgenConfig.TypeMap, len(basicModels))
-	}
-	for name, entry := range basicModels {
-		if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
-			gqlgencCfg.GQLConfig.Models[name] = entry
-		}
 	}
 
 	// Schema.Implements iteration order is non-deterministic; sort for stable output.
@@ -88,6 +74,10 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		sort.Slice(v, func(i, j int) bool { return v[i].Name < v[j].Name })
 	}
 
+	// Parse the query documents before enum/model registration so we can
+	// register lazily — only enums actually selected by an operation get
+	// emitted, matching genqlient's behaviour and avoiding name collisions
+	// with user-defined fragments that happen to share a schema enum's name.
 	expandedPaths, err := expandGlobs(cfg.Query, cfg.Dir, log)
 	if err != nil {
 		return fmt.Errorf("generate: expand query globs: %w", err)
@@ -122,6 +112,34 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	queryDocument, err := parsequery.ParseQueryDocuments(gqlgencCfg.GQLConfig.Schema, querySources)
 	if err != nil {
 		return fmt.Errorf("generate: parse query documents: %w", err)
+	}
+
+	// Register model bindings for user-defined INPUT_OBJECT and ENUM types so
+	// gqlgenc's SourceGenerator.Type() can resolve them. INPUT_OBJECTs are
+	// always registered (they map to graphql.String, no Go-type collision).
+	// ENUMs are registered only when an operation selects a field of that
+	// enum's type — registering an unused enum risks colliding with a user
+	// fragment of the same name.
+	usedEnums := UsedEnumsInOperations(gqlgencCfg.GQLConfig.Schema, queryDocument)
+	enums := FilterEnumsByUsed(
+		CollectEnums(gqlgencCfg.GQLConfig.Schema),
+		usedEnums,
+	)
+	basicModels := BasicTypeModels(gqlgencCfg.GQLConfig.Schema, clientPkg.ImportPath())
+	if gqlgencCfg.GQLConfig.Models == nil {
+		gqlgencCfg.GQLConfig.Models = make(gqlgenConfig.TypeMap, len(basicModels))
+	}
+	for name, entry := range basicModels {
+		// Skip enum bindings that no operation references. Without this, an
+		// unused enum named the same as a user fragment makes gqlgenc's
+		// Fragments() bail with "X is duplicated".
+		def := gqlgencCfg.GQLConfig.Schema.Types[name]
+		if def != nil && def.Kind == ast.Enum && !usedEnums[name] {
+			continue
+		}
+		if _, ok := gqlgencCfg.GQLConfig.Models[name]; !ok {
+			gqlgencCfg.GQLConfig.Models[name] = entry
+		}
 	}
 
 	operationQueryDocuments, err := querydocument.QueryDocumentsByOperations(
@@ -161,27 +179,25 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		_, _ = fmt.Fprintf(log, "Operation: %s\n", op.Name)
 	}
 
+	// Classify operations: introspection-only ops are served from the baked
+	// supergraph at codegen time (or at runtime if they depend on variables),
+	// not via federation. Skip planning for those.
+	introspectionByName, err := PlanIntrospectionOps(
+		gqlgencCfg.GQLConfig.Schema,
+		queryDocument,
+	)
+	if err != nil {
+		return fmt.Errorf("generate: plan introspection: %w", err)
+	}
+
 	urlMode := cfg.URLMode
 	if urlMode == "" {
 		urlMode = "baked"
 	}
 
-	marshalSpec := MarshalURLPlanSpec
-	if urlMode == "enum" {
-		marshalSpec = MarshalEnumPlanSpec
-	}
-
-	planSpecs := make(map[string]string, len(operations))
-	for _, op := range operations {
-		plan, err := federation.BuildPlan(sg, op.Operation, op.Name)
-		if err != nil {
-			return fmt.Errorf("generate: plan %q: %w", op.Name, err)
-		}
-		specJSON, err := marshalSpec(plan)
-		if err != nil {
-			return fmt.Errorf("generate: marshal plan spec %q: %w", op.Name, err)
-		}
-		planSpecs[op.Name] = specJSON
+	planSpecs, err := buildPlanSpecs(sg, operations, introspectionByName, urlMode)
+	if err != nil {
+		return fmt.Errorf("generate: %w", err)
 	}
 
 	if err := RenderFederationTemplate(
@@ -195,6 +211,7 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 		planSpecs,
 		urlMode,
 		enums,
+		introspectionByName,
 	); err != nil {
 		return fmt.Errorf("generate: render template: %w", err)
 	}
@@ -214,6 +231,41 @@ func Generate(ctx context.Context, cfg *defConfig.Config) error {
 	}
 
 	return nil
+}
+
+// buildPlanSpecs returns one URL/enum plan spec per non-introspection
+// operation. Introspection-only operations (entries present in
+// introspectionByName) are skipped because they don't make subgraph calls.
+//
+// urlMode controls the plan-spec format: "enum" produces a placeholder spec
+// resolved per-call via service discovery; anything else (including "") bakes
+// the subgraph URLs into the spec.
+func buildPlanSpecs(
+	sg *federation.Supergraph,
+	operations []*clientgenv2.Operation,
+	introspectionByName map[string]IntrospectionInfo,
+	urlMode string,
+) (map[string]string, error) {
+	marshalSpec := MarshalURLPlanSpec
+	if urlMode == "enum" {
+		marshalSpec = MarshalEnumPlanSpec
+	}
+	out := make(map[string]string, len(operations))
+	for _, op := range operations {
+		if _, isIntrospection := introspectionByName[op.Name]; isIntrospection {
+			continue
+		}
+		plan, err := federation.BuildPlan(sg, op.Operation, op.Name)
+		if err != nil {
+			return nil, fmt.Errorf("plan %q: %w", op.Name, err)
+		}
+		specJSON, err := marshalSpec(plan)
+		if err != nil {
+			return nil, fmt.Errorf("marshal plan spec %q: %w", op.Name, err)
+		}
+		out[op.Name] = specJSON
+	}
+	return out, nil
 }
 
 func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) *gqlgencConfig.Config {

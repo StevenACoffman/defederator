@@ -287,7 +287,7 @@ defederator migrate "$WEBAPP/services/zendesk"
 To migrate all services at once (inspect output before committing):
 
 ```sh
-WEBAPP=~/khan/webapp
+export WEBAPP=~/khan/webapp
 for svc in \
   admin ai-guide assessments assign-content assignments campaigns \
   certificates coaches content-editing content-library content \

@@ -5,7 +5,9 @@
 	{{- if .HasTypedEntityFetch }}{{ reserveImport "encoding/json" }}{{ end }}
 
 	{{- range $model := .Operation}}
+	{{- if not (introspection $model.Name) }}
 	const {{ $model.Name|go }}PlanSpec = `{{ index $.PlanSpecs $model.Name }}`
+	{{- end}}
 	{{- end}}
 
 	{{- if .ClientInterfaceName }}
@@ -49,7 +51,9 @@
         // catch missing subgraph entries immediately rather than at first call.
         for opName, specJSON := range map[string]string{
             {{- range $model := .Operation}}
+            {{- if not (introspection $model.Name) }}
             "{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
+            {{- end}}
             {{- end}}
         } {
             if _, err := Resolve(specJSON, subgraphURLs); err != nil {
@@ -96,7 +100,9 @@
         // Validate all specs parse correctly at construction time.
         for opName, specJSON := range map[string]string{
             {{- range $model := .Operation}}
+            {{- if not (introspection $model.Name) }}
             "{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
+            {{- end}}
             {{- end}}
         } {
             if _, err := ResolveURLSpec(specJSON); err != nil {
@@ -163,6 +169,27 @@ var All{{ $enum.GoName }} = []{{ $enum.GoName }}{
 {{- end }}
 
 {{- range $model := .Operation}}
+{{- with introspection $model.Name }}
+	// Baked introspection response — evaluated at codegen time against the
+	// supergraph schema. No subgraph call is made at runtime. Variable-bound
+	// introspection arguments are not yet supported; see TODO.md "Runtime
+	// introspection fallback" in the defederator repo.
+	const {{ $model.Name|go }}IntrospectionResponse = `{{ .Response }}`
+
+		{{- if $.GenerateClient }}
+		func (c *Client) {{ $model.Name|go }} (ctx context.Context{{- range $arg := $model.Args }}, {{ $arg.Variable | goPrivate }} {{ $arg.Type | ref }} {{- end }}) (*{{ $model.ResponseStructName | go }}, error) {
+			_ = ctx
+			{{- range $arg := $model.Args }}
+			_ = {{ $arg.Variable | goPrivate }}
+			{{- end }}
+			var res {{ $model.ResponseStructName | go }}
+			if err := json.Unmarshal([]byte({{ $model.Name|go }}IntrospectionResponse), &res); err != nil {
+				return nil, fmt.Errorf("{{ $model.Name }}: unmarshal baked response: %w", err)
+			}
+			return &res, nil
+		}
+		{{- end }}
+{{- else }}
 	const {{ $model.Name|go }}Document = `{{ $model.Operation }}`
 
 	{{- if $.GenerateClient }}
@@ -190,9 +217,12 @@ var All{{ $enum.GoName }} = []{{ $enum.GoName }}{
 		}
 	{{- end}}
 {{- end}}
+{{- end}}
 
 var DocumentOperationNames = map[string]string{
    {{- range $model := .Operation}}
+   {{- if not (introspection $model.Name) }}
     {{ $model.Name|go }}Document: "{{ $model.Name }}",
+   {{- end}}
    {{- end}}
 }

@@ -175,6 +175,7 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 		planSpecs,
 		"baked",
 		enums,
+		nil,
 	); err != nil {
 		return fmt.Errorf("gqlgencfed: render template: %w", err)
 	}

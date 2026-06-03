@@ -65,9 +65,37 @@ func TestDefederatorYAML_WithBindings(t *testing.T) {
 	if !strings.Contains(got, "KALocale:\n    type: string") {
 		t.Errorf("KALocale should remain string\noutput:\n%s", got)
 	}
-	// Enum auto-emit comment always present.
-	if !strings.Contains(got, "Enums are auto-emitted as typed Go strings") {
-		t.Errorf("output missing enum auto-emit comment\noutput:\n%s", got)
+	// With no enums or input objects supplied by the caller, no enum/input-
+	// object binding section appears. The scalar bindings still pass through.
+	if strings.Contains(got, "ENUM bindings") {
+		t.Errorf("enum binding section should be absent when no enums passed\noutput:\n%s", got)
+	}
+	if strings.Contains(got, "INPUT_OBJECT bindings") {
+		t.Errorf("input-object binding section should be absent when none passed\noutput:\n%s", got)
+	}
+}
+
+func TestDefederatorYAML_WithEnums(t *testing.T) {
+	in := YAMLInput{
+		Genqlient: GenqlientConfig{
+			Schema:    "../../schema.graphql",
+			Generated: "generated/genqlient/queries.go",
+		},
+		Enums:        []string{"Color", "MasteryLevel"},
+		GenqlientPkg: "github.com/Khan/webapp/services/foo/generated/genqlient",
+	}
+	got, err := DefederatorYAML(in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, want := range []string{
+		"ENUM bindings",
+		"Color:\n    type: github.com/Khan/webapp/services/foo/generated/genqlient.Color",
+		"MasteryLevel:\n    type: github.com/Khan/webapp/services/foo/generated/genqlient.MasteryLevel",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q\nfull output:\n%s", want, got)
+		}
 	}
 }
 

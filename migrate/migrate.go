@@ -162,29 +162,31 @@ func generateFiles(
 	serviceName := filepath.Base(abs)
 	genqlientPkg := modulePath + "/services/" + serviceName + "/generated/genqlient"
 
-	// Find the join__Graph enum name for this service so we can filter INPUT_OBJECTs
-	// to only those owned by this subgraph (via @join__type(graph:) directives).
-	var serviceEnumName string
-	for _, sg := range subgraphs {
-		if sg.ServiceName == serviceName {
-			serviceEnumName = sg.EnumName
-			break
-		}
-	}
-	ownedInputObjects, _ := ParseInputObjectsForService(string(sdl), serviceEnumName)
-
-	// Prune to the intersection: only bind INPUT_OBJECTs that this service owns
-	// AND that appear as variables in at least one operation. Anything else
-	// would be a binding for a type no operation passes as an argument.
+	// Bind every INPUT_OBJECT and ENUM that appears in at least one operation
+	// to the corresponding genqlient-generated Go type. genqlient emits a Go
+	// type for any input/enum referenced by its operations, and defederator
+	// reads the same operation files via the inherited query: glob, so the
+	// genqlient package is guaranteed to have these types. Pointing
+	// defederator at them aligns the two clients' Go types, removing the
+	// per-call-site `defederator.Foo(x)` casts that user wrappers would
+	// otherwise need.
+	//
+	// We do NOT restrict to subgraph-owned types: cross-service code routinely
+	// passes input objects owned by other subgraphs (the local service is
+	// calling into them), so the ownership filter is wrong for this purpose.
 	usedInputObjects, err := OperationVariableInputObjects(schema, operationSources)
 	if err != nil {
 		return fmt.Errorf("collect operation input objects: %w", err)
 	}
-	inputObjects := intersectSorted(ownedInputObjects, usedInputObjects)
+	usedEnums, err := OperationUsedEnums(schema, operationSources)
+	if err != nil {
+		return fmt.Errorf("collect operation enums: %w", err)
+	}
 
 	in := YAMLInput{
 		Genqlient:    gqCfg,
-		InputObjects: inputObjects,
+		InputObjects: usedInputObjects,
+		Enums:        usedEnums,
 		GenqlientPkg: genqlientPkg,
 	}
 	defedYAML, err := DefederatorYAML(in)

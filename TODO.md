@@ -52,6 +52,37 @@ deliberate effort rather than a side errand.
 | `gochecknoglobals` | 5 | Package-level maps used as constants (`keepBindingType`, `federationDirectiveNames`, etc.). Either inline them, hoist into functions returning the map, or accept a `//nolint:gochecknoglobals` after team review. |
 | `cyclop` | 3 | Cyclomatic complexity on `applyProjection`, `collectLeavesRaw`, `mergeEntityResults`. Likely splits naturally with the cognitive-complexity refactor of the same functions. |
 
+## Runtime introspection fallback
+
+Defederator currently serves introspection queries via codegen-time evaluation
+(the "bake" path). Operations whose arguments depend on query variables
+(`__type(name: $name)`) are not supported — `PlanIntrospectionOps` will route
+them through the federation planner, which fails because `__schema`/`__type`
+have no subgraph owner.
+
+To support variable-bearing introspection operations, two architectural
+options exist:
+
+- **Embed the resolver as Go source per generated package.** The resolver in
+  `generator/introspection_resolver.go` (~700 LOC) and a small `sync.Once`
+  shim around `//go:embed supergraph.graphql` would be appended to each
+  generated package's `federation_exec.go`. Pros: no new module dependency.
+  Cons: ~700 LOC of duplication per migrated service.
+
+- **Build `defederator/runtime/introspection` as a library.** Generated client
+  imports it; webapp adds `github.com/StevenACoffman/defederator` to its
+  `go.mod`. Pros: small generated code, one source of truth. Cons: new project
+  dependency.
+
+Picking either option is straightforward once a real use case appears. Today
+the only known webapp introspection query is `Users_ListMutations`, which is
+fully bakeable, so the work is deferred.
+
+When implementing: the resolver core (`ResolveIntrospection` in
+`generator/introspection_resolver.go`) is already pure and takes a
+`variables map[string]any`. It can be reused as-is — only the SDL embed and
+selection-set walker plumbing differ between codegen-time and runtime modes.
+
 ## Workflow
 
 Pre-commit hook to keep new code clean while legacy churns down separately:

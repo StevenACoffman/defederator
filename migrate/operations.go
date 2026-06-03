@@ -133,6 +133,84 @@ func collectInputObjectNames(schema *ast.Schema, t *ast.Type, seen map[string]st
 	}
 }
 
+// OperationUsedEnums returns the sorted, deduplicated set of enum type names
+// that appear in any operation's variable types or response selection field
+// types across the given sources, restricted to types declared in schema.
+//
+// Used to emit enum bindings in `.defederator.yml` that point at the
+// corresponding genqlient-generated Go types. This way the user's existing
+// genqlient-typed values (e.g. genqlient.OptOutStatusOptedIn) can be passed
+// to defederator client methods without casts.
+func OperationUsedEnums(
+	schema *ast.Schema,
+	sources []*ast.Source,
+) ([]string, error) {
+	if schema == nil {
+		return nil, nil
+	}
+	doc, err := parsequery.ParseQueryDocuments(schema, sources)
+	if err != nil {
+		return nil, fmt.Errorf("migrate: parse operations: %w", err)
+	}
+	seen := map[string]struct{}{}
+	for _, op := range doc.Operations {
+		for _, vd := range op.VariableDefinitions {
+			collectEnumNames(schema, vd.Type, seen)
+		}
+		collectSelectionEnumNames(schema, op.SelectionSet, seen)
+	}
+	for _, f := range doc.Fragments {
+		collectSelectionEnumNames(schema, f.SelectionSet, seen)
+	}
+	if len(seen) == 0 {
+		return nil, nil
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// collectEnumNames walks a type expression (non-null/list wrappers stripped)
+// and adds the named base type to seen if the schema marks it as an ENUM.
+func collectEnumNames(schema *ast.Schema, t *ast.Type, seen map[string]struct{}) {
+	if t == nil {
+		return
+	}
+	if t.Elem != nil {
+		collectEnumNames(schema, t.Elem, seen)
+		return
+	}
+	def := schema.Types[t.NamedType]
+	if def != nil && def.Kind == ast.Enum {
+		seen[t.NamedType] = struct{}{}
+	}
+}
+
+// collectSelectionEnumNames walks a selection set and records the enum type
+// name of every field whose return type is (or wraps) an enum. Inline
+// fragments are followed; fragment spreads are walked at the document level
+// by OperationUsedEnums.
+func collectSelectionEnumNames(
+	schema *ast.Schema,
+	sels ast.SelectionSet,
+	seen map[string]struct{},
+) {
+	for _, sel := range sels {
+		switch s := sel.(type) {
+		case *ast.Field:
+			if s.Definition != nil {
+				collectEnumNames(schema, s.Definition.Type, seen)
+			}
+			collectSelectionEnumNames(schema, s.SelectionSet, seen)
+		case *ast.InlineFragment:
+			collectSelectionEnumNames(schema, s.SelectionSet, seen)
+		}
+	}
+}
+
 // UsedSubgraphs returns the sorted, deduplicated set of join__Graph enum names
 // that the given operation sources actually touch, as determined by planning
 // each operation with the federation query planner.
@@ -204,26 +282,3 @@ func FilterSubgraphs(
 // one place.
 func serviceNameFromDir(absDir string) string { return filepath.Base(absDir) }
 
-// intersectSorted returns the sorted intersection of two sorted string slices.
-// Inputs must already be sorted (the helpers in this package emit sorted
-// results); duplicates within one input are preserved at most once in the
-// output.
-func intersectSorted(a, b []string) []string {
-	out := make([]string, 0, min(len(a), len(b)))
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		switch {
-		case a[i] == b[j]:
-			if len(out) == 0 || out[len(out)-1] != a[i] {
-				out = append(out, a[i])
-			}
-			i++
-			j++
-		case a[i] < b[j]:
-			i++
-		default:
-			j++
-		}
-	}
-	return out
-}
