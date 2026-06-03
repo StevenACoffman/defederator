@@ -334,3 +334,194 @@ These files must be committed alongside the config and client scaffold.
 **`cross_service/client.go` already exists** — migrate skips existing files by default. Pass `--force` to overwrite, or delete the file manually first.
 
 **Service-discovery call fails at runtime for unknown subgraph** — a subgraph name in `_subgraphServices` does not match any registered service. Either the enum name is wrong or the service name derivation (SCREAMING_SNAKE → kebab-case) produced a name that differs from the actual registration. Check `sd.EndpointForServiceWithVersion` logs.
+
+---
+
+## Addendum: bug categories uncovered by webapp migration
+
+Migrating real webapp services (recommendations, users, content-library, districts, ai-guide) surfaced bugs in five layers of the stack — most in defederator itself, some in webapp's lint rules, and some pre-existing user-code defects that the previous string-typed generation masked. Each category is grouped with the root cause, the symptom, and a concrete example seen during migration.
+
+### 1. Codegen recursion bugs (fragment conversion getters)
+
+Defederator generates `Get<FragmentName>()` conversion getters that reconstruct a named fragment from an owner type that spreads it. The original implementation recursed into nested struct fields unconditionally, which broke when the nested type wasn't a per-call-site shape.
+
+**1a. Recursion into foreign-package types.** Generated code expanded `time.Time` field-by-field, copying `wall`, `ext`, `loc` — unexported fields that the receiving package can't reference. Fix: `localStructIfRecursable` only recurses into types defined in the client package.
+
+> recommendations service, `CourseProgressFields.LastWorkedOn` (`*time.Time`):
+> ```go
+> LastWorkedOn: &Time{ wall: t.LastWorkedOn.wall, ext: t.LastWorkedOn.ext, loc: Location{...} }
+> ```
+> Compile error: `cannot refer to unexported field wall`.
+
+**1b. Recursion into named-fragment types.** Gqlgenc's internal `types.Struct` for a named fragment is the *pre-flattening* shape (with the spread declared as a literal field), but the emitted Go struct has those fields *flattened in*. Recursing produced a literal referencing fields that don't exist on the emitted struct.
+
+> recommendations service, `Wrapper` fragment:
+> ```go
+> &CurationNodeWrapper{ CurationNodeFields: ... }   // emitted struct has ID/ContentKind/RelativeURL/Parent, not CurationNodeFields
+> ```
+> Compile error: `unknown field CurationNodeFields in struct literal of type CurationNodeWrapper`.
+
+**1c. Pointer literal type mismatch.** When the target field is `*PerCallSiteStruct` rather than `PerCallSiteStruct`, the literal needs `&T{…}` not `T{…}`. Fix: `localStructIfRecursable` returns an `isPtr` flag.
+
+> content-library service:
+> ```go
+> CurrentMasteryV2: CurationNodeProgressFields_CurrentMasteryV2{…}   // field type is *T, not T
+> ```
+
+**1d. Slice of per-call-site struct.** Direct-assignment fails because element types differ across owner and target Go names. Fix: emit an inline IIFE that allocates a new slice and copies element-by-element.
+
+> content-library service, `[]*ContentLibraryArticle_…_URLPaths` → `[]*ContentLibraryLearnableContent_URLPaths`.
+
+**1e. Element-type name resolution for slices.** Initial slice-rebuild used `types.Type.String()` for the element, producing `&github.com/Khan/.../pkg.X_URLPaths{…}` — invalid Go. Fix: new `sliceElementName` walks `Slice → Pointer → Named` to extract the bare last-segment name.
+
+### 2. Codegen type-registration bugs (lazy/eager enums and __schema)
+
+**2a. Enum-only-in-variable-type panic.** `UsedEnumsInOperations` originally walked only response selection sets, missing enums that appear only as operation variable types. gqlgenc's `OperationArguments` then panicked.
+
+> users service, `Users_WriteUserAdminLog($kind: UserAdminLogKind!)`:
+> ```
+> panic: no model configured for GraphQL type "UserAdminLogKind"
+> ```
+> Fix: also walk `op.VariableDefinitions`.
+
+**2b. Enum-name vs fragment-name collision.** Eagerly registering every schema enum as a model meant gqlgenc bailed when a user fragment shared the name.
+
+> recommendations service had `enum CompletionState` in the schema and a user fragment also named `CompletionState`:
+> ```
+> defederator: generate: generate fragments: CompletionState is duplicated
+> ```
+> Fix: register enums lazily — only enums referenced in operations get a model entry. Matches genqlient.
+
+**2c. `__schema` has no subgraph owner.** Federation routing tables don't own `__schema` / `__type`; the gateway serves them. Defederator skips the gateway, so introspection operations failed planning.
+
+> users service, `Users_ListMutations { __schema { mutationType { fields { name } } } }`:
+> ```
+> defederator: generate: plan "Users_ListMutations": federation: field "__schema" has no subgraph owner in routing table
+> ```
+> Fix: evaluate introspection queries against the supergraph schema at codegen time and emit a baked JSON constant + a method that unmarshals it.
+
+### 3. Migrate output bugs (.defederator.yml and cross_service/client.go)
+
+**3a. YAML alias parsing of glob patterns.** `*.go` starts with `*` which YAML 1.2 treats as an alias reference. The genqlient `operations:` list of glob patterns broke when copied verbatim.
+
+> rest-gateway service:
+> ```
+> could not find alias '.go'
+> ```
+> Fix: single-quote every operation pattern (`yamlSingleQuote` with proper `''`-escaping).
+
+**3b. Multi-flavor context type loss.** The migrate template branched on `AuthFlavors.Multi` and emitted *either* `_federationCtx` + `newFederationClient` *or* `_jobsCtx` + per-flavor constructors. Districts has both auth flavors *and* hand-written wrappers that use `newFederationClient(ctx)`, so the Multi branch broke compilation.
+
+> districts service, many cross_service files:
+> ```go
+> client := newFederationClient(ctx)   // undefined in multi-flavor template
+> ```
+> Fix: always emit `federationCtx` + `newFederationClient`; Multi flavors get the per-flavor constructors *in addition*.
+
+**3c. Underscore-prefixed type names trigger `ka-visibility`.** Webapp treats leading-underscore identifiers as file-private (enforced by `dev/linters/visibility_lint.go`). The migrate template's `_federationCtx` / `_jobsCtx` could only be referenced from `client.go`, so every cross-service file that took one as a parameter failed lint.
+
+> ~140 lint failures across `services/districts/cross_service/*.go`:
+> ```
+> cannot refer to file-private _federationCtx
+> ```
+> Fix: drop the leading underscore in the migrate template (and migrate-test golden file).
+
+**3d. Owned-INPUT_OBJECT filter was too narrow.** Migrate originally bound only INPUT_OBJECTs owned by the local subgraph *and* used in operations. But cross-service code routinely passes input objects owned by *other* subgraphs (the local service is calling into them), so the intersection dropped them.
+
+> districts service: `Districts_UpdateUnitMasteryAssignments` takes `UpdateMasteryAssignmentInput` (owned by `ASSIGNMENTS`, not `DISTRICTS`). The generated method's parameter type was `[]string` because the binding wasn't emitted:
+> ```
+> cannot use []*genqlient.UpdateMasteryAssignmentInput as []string
+> ```
+> Fix: drop the ownership filter; bind any INPUT_OBJECT used as an operation variable.
+
+**3e. Enum bindings missing.** Without explicit enum bindings, defederator emits its own `type X string` distinct from `genqlient.X`. Every caller then needed a per-call-site `defederator.X(x)` cast.
+
+> Multiple services. Fix: `OperationUsedEnums` discovers enums in variable and response positions, migrate emits one binding per used enum pointing at the genqlient type.
+
+### 4. Binding & operation-reference gaps (lint-driven)
+
+**4a. `ka-genqlient` requires `_Operation` references.** Webapp's `genqlient_lint.go` registers a genqlient operation as "used" only when the file calls `genqlient.X(...)` *or* references `genqlient.X_Operation`. Defederator method calls don't satisfy either.
+
+> Every cross_service file that has `_ = ``# @genqlient mutation Foo …``` but no longer calls `genqlient.Foo`:
+> ```
+> genqlient operation NOT used in file; add `_ = genqlient.Foo` somewhere
+> ```
+> Fix (user-side): add `var _ = genqlient.X_Operation` near the imports for each `# @genqlient` block kept for safelist purposes.
+
+**4b. `ka-graphql-task` requires `_Operation` strings, not defederator `Document` consts.** Tasks dispatched via `tasks.GraphQLTask(...)` need a recognised genqlient `_Operation` constant as the mutation argument.
+
+> ai-guide service, `tasks.GraphQLTask(defederator.AiGuideTaskCheckForIdleThreadDocument, ...)`:
+> ```
+> graphql_task: mutation argument must look like `genqlient.<service>_Task_<something>_Operation`
+> ```
+> Fix (user-side): swap `defed.XDocument` for `genqlient.X_Operation` at each `tasks.GraphQLTask(...)` call.
+
+### 5. Latent user-code bugs surfaced by stricter typing
+
+When defederator started emitting typed enum / typed pointer fields where the genqlient client previously emitted strings, several existing usage patterns stopped compiling. These were pre-existing defects masked by string-flavored generation.
+
+**5a. Pointer-typed getter compared to string literal.** `errorResult.GetCode()` returns `*EnumType`. Comparison with a string literal was always a programmer error; the typed pointer just made it visible.
+
+> districts service, `coaches_mutations.go`:
+> ```go
+> if errorResult.GetCode() == "INTERNAL" { … }   // *EnumType vs string
+> ```
+> Fix: `if c := errorResult.GetCode(); c != nil && *c == "INTERNAL"`.
+
+**5b. Redundant `string(enum)` casts.** With genqlient and defederator now sharing the same Go enum type (via bindings), `string(genqlient.X)` flattens to `string` and breaks methods that expect the typed enum.
+
+> Many cross_service files:
+> ```go
+> optOutStatus := string(genqlient.OptOutStatusOptedIn)   // now `string`, method wants OptOutStatus
+> ```
+> Fix: drop the cast — `optOutStatus := genqlient.OptOutStatusOptedIn`.
+
+**5c. Cross-package enum cast lost type.** `permissions.CapabilityName` is a type alias for `permissions/genqlient.CapabilityName` (a different package than the service's local genqlient). `string(capability)` collapses to a plain string, which the method (typed against the service's local genqlient) rejects.
+
+> districts service, `admin.go`:
+> ```go
+> client.DistrictsUserHasCapability(ctx, kaid, string(capability), …)   // string vs genqlient.CapabilityName
+> ```
+> Fix: `genqlient.CapabilityName(capability)` to re-type into the target package.
+
+**5d. `civil.Date` ↔ string boundary.** Genqlient maps the `Date` scalar to `civil.Date` (per the user binding). Code that built a `*string` for the GraphQL arg or expected a `string` back broke at the type boundary.
+
+> districts service, `course_progress_stp.go`:
+> ```go
+> rowFrom, _ := civil.ParseDate(r.GetFrom())   // r.GetFrom() returns *civil.Date, not string
+> ```
+> Fix: use the date directly — `rowFrom := generic.Deref(r.GetFrom())`.
+
+### 6. Pre-existing webapp lint debt revealed by recompilation
+
+Stricter recompilation of every cross-service caller surfaced ~145 `ka-context-interface` (ADR-429) violations — functions whose `ctx interface { … }` declaration doesn't list every transitively-used KAContext. These are not bugs in defederator; they're tech debt the package previously hid because nothing forced rebuilds at the touched call sites. Mechanical fix via a script (`/tmp/claude/fix_ka_context_interface.py`) that adds/removes interfaces based on the lint suggestions, plus `goimports -w` to clean up the imports.
+
+> rostering files, ~140 sites:
+> ```
+> ctx uses but does not explicitly request interface(s) context.Context, httpctx.KAContext, service_discovery.KAContext, web.ServiceVersionContext
+> ```
+
+### 7. Visibility convention applied to user type aliases
+
+Webapp's `ka-visibility` lint also rejects underscore-prefixed identifiers in user code. Local interface aliases that pre-dated the lint surfaced once the surrounding code was recompiled.
+
+> districts service, `admin_insights/metrics_fetch.go`:
+> ```go
+> type _metricsCtx interface { … }   // file-private to definition, used by sibling files
+> ```
+> Fix: rename `_metricsCtx` → `metricsCtx`. Generalises: any underscore-prefixed type used across files in a package will need renaming during migration.
+
+---
+
+### Takeaways for future migrations
+
+The categories above sort roughly by how often they recurred:
+
+1. **Codegen recursion bugs (1a–1e)** surfaced once per new fragment shape. Each fix narrowed the recursion criterion; further fragment shapes may surface more.
+2. **Type-registration bugs (2a–2c)** surfaced once per new schema-feature use case. Lazy registration solved most.
+3. **Migrate output bugs (3a–3e)** were caught by the first webapp service. Subsequent services hit the same fixes.
+4. **Binding gaps (4a–4b)** are inherent to keeping both clients — the safelist + task-dispatch lints need genqlient references regardless of defederator.
+5. **Latent user-code bugs (5a–5d)** are one-time costs per service: typed generation surfaces them at compile time, which is the point.
+6. **Lint debt (6, 7)** is the long tail. Mostly mechanical; the script handles it.
+
+When migrating a new service, expect to encounter (3a)–(3e) and (5a)–(5d) consistently. The codegen and registration categories (1, 2) are mostly closed; new instances would represent genuinely new schema shapes.
