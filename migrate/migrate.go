@@ -153,7 +153,7 @@ func generateFiles(
 	abs, modulePath string,
 	gqCfg GenqlientConfig,
 	subgraphs []SubgraphEntry,
-	sdl []byte,
+	_ []byte, // sdl: reserved; SDL is already parsed into schema by analyse()
 	schema *ast.Schema,
 	operationSources []*ast.Source,
 	authFlavors AuthFlavors,
@@ -183,7 +183,7 @@ func generateFiles(
 		return fmt.Errorf("collect operation enums: %w", err)
 	}
 
-	in := YAMLInput{
+	in := &YAMLInput{
 		Genqlient:    gqCfg,
 		InputObjects: usedInputObjects,
 		Enums:        usedEnums,
@@ -238,7 +238,7 @@ func writeFile(path string, data []byte, opts Options) error {
 		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
 	}
 	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return err
+		return fmt.Errorf("write %s: %w", path, err)
 	}
 	_, _ = fmt.Fprintf(os.Stdout, "migrate: wrote %s\n", path)
 	return nil

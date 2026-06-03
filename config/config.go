@@ -9,19 +9,6 @@ import (
 	"github.com/goccy/go-yaml"
 )
 
-var genqlientFilenames = []string{
-	"genqlient.yaml",
-	"genqlient.yml",
-	".genqlient.yaml",
-	".genqlient.yml",
-}
-
-// defaultFilenames is searched in order; defederator files take precedence.
-var defaultFilenames = []string{
-	".defederator.yml", "defederator.yml", "defederator.yaml",
-	"genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml",
-}
-
 // PackageConfig specifies the output file and Go package name for generated code.
 type PackageConfig struct {
 	Filename string `yaml:"filename"`
@@ -163,21 +150,28 @@ func LoadConfigFromDir(dir string) (*Config, error) {
 }
 
 func isGenqlientFilename(name string) bool {
-	for _, n := range genqlientFilenames {
-		if name == n {
-			return true
-		}
+	switch name {
+	case "genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml":
+		return true
 	}
 	return false
+}
+
+// defaultFilenames is searched in order; defederator files take precedence.
+func defaultFilenames() []string {
+	return []string{
+		".defederator.yml", "defederator.yml", "defederator.yaml",
+		"genqlient.yaml", "genqlient.yml", ".genqlient.yaml", ".genqlient.yml",
+	}
 }
 
 func findConfig(dir string) (string, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("config: resolve absolute path %q: %w", dir, err)
 	}
 	for {
-		for _, name := range defaultFilenames {
+		for _, name := range defaultFilenames() {
 			candidate := filepath.Join(abs, name)
 			if _, err := os.Stat(candidate); err == nil {
 				return candidate, nil

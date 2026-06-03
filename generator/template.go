@@ -158,43 +158,15 @@ func RenderFederationTemplate(
 	}
 	g := &genGettersGenerator{clientPackageName: client.Package}
 
-	// Build response type map for entity fetch code generation.
-	respTypeByName := make(map[string]types.Type, len(operationResponses))
-	for _, or := range operationResponses {
-		respTypeByName[or.Name] = or.Type
-	}
-
-	// Determine if any operation uses typed entity merge (controls json import).
-	hasTypedEntityFetch := false
-	for _, op := range operations {
-		if specJSON := planSpecs[op.Name]; specJSON != "" {
-			if respType := respTypeByName[op.ResponseStructName]; respType != nil {
-				if g.genEntityFetch(
-					op.Name,
-					respType,
-					templates.ToGo(op.ResponseStructName),
-					specJSON,
-				) != "" {
-					hasTypedEntityFetch = true
-					break
-				}
-			}
-		}
-	}
-
-	// Determine if any response type needs a custom UnmarshalJSON (controls json import).
-	hasInlineFragType := false
-	for _, or := range operationResponses {
-		if genUnmarshalJSONMethod(or.Name, or.Type) != "" {
-			hasInlineFragType = true
-			break
-		}
-	}
-
-	// Introspection ops always need encoding/json (the baked bytes are
-	// unmarshalled into the response struct) so force the import flag on when
-	// any introspection op is present.
-	needsJSON := hasTypedEntityFetch || hasInlineFragType || len(introspectionByName) > 0
+	respTypeByName := buildResponseTypeMap(operationResponses)
+	needsJSON := needsJSONImport(
+		g,
+		operations,
+		operationResponses,
+		planSpecs,
+		respTypeByName,
+		introspectionByName,
+	)
 
 	err := templates.Render(templates.Options{
 		PackageName: client.Package,
@@ -228,6 +200,73 @@ func RenderFederationTemplate(
 		return fmt.Errorf("%s generating failed: %w", client.Filename, err)
 	}
 	return nil
+}
+
+// buildResponseTypeMap indexes operationResponses by name for fast lookup
+// during entity-fetch code generation.
+func buildResponseTypeMap(
+	operationResponses []*clientgenv2.OperationResponse,
+) map[string]types.Type {
+	m := make(map[string]types.Type, len(operationResponses))
+	for _, or := range operationResponses {
+		m[or.Name] = or.Type
+	}
+	return m
+}
+
+// needsJSONImport reports whether the rendered template needs encoding/json.
+// Set when any operation produces typed entity-merge code, any response type
+// requires a custom UnmarshalJSON, or any introspection op is present (the
+// baked bytes for introspection are unmarshalled into the response struct).
+func needsJSONImport(
+	g *genGettersGenerator,
+	operations []*clientgenv2.Operation,
+	operationResponses []*clientgenv2.OperationResponse,
+	planSpecs map[string]string,
+	respTypeByName map[string]types.Type,
+	introspectionByName map[string]IntrospectionInfo,
+) bool {
+	if len(introspectionByName) > 0 {
+		return true
+	}
+	if hasTypedEntityFetch(g, operations, planSpecs, respTypeByName) {
+		return true
+	}
+	for _, or := range operationResponses {
+		if genUnmarshalJSONMethod(or.Name, or.Type) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasTypedEntityFetch reports whether any operation generates typed entity
+// merge code (which references encoding/json).
+func hasTypedEntityFetch(
+	g *genGettersGenerator,
+	operations []*clientgenv2.Operation,
+	planSpecs map[string]string,
+	respTypeByName map[string]types.Type,
+) bool {
+	for _, op := range operations {
+		specJSON := planSpecs[op.Name]
+		if specJSON == "" {
+			continue
+		}
+		respType := respTypeByName[op.ResponseStructName]
+		if respType == nil {
+			continue
+		}
+		if g.genEntityFetch(
+			op.Name,
+			respType,
+			templates.ToGo(op.ResponseStructName),
+			specJSON,
+		) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *genGettersGenerator) genFunc() func(name string, p types.Type) string {

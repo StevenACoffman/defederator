@@ -63,7 +63,8 @@ func TestExpandGlobs_DoubleStar(t *testing.T) {
 		}
 	}
 
-	got, err := expandGlobs([]string{filepath.Join(tmp, "**/*.graphql")}, tmp, io.Discard)
+	pattern := tmp + string(filepath.Separator) + "**" + string(filepath.Separator) + "*.graphql"
+	got, err := expandGlobs([]string{pattern}, tmp, io.Discard)
 	if err != nil {
 		t.Fatalf("expandGlobs: %v", err)
 	}

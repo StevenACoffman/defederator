@@ -105,6 +105,9 @@ func decodePlanEntityFetches(specJSON string) ([]urlSpecEntityFetch, error) {
 // defederator import.
 func WriteExecFile(outDir, pkg string) error {
 	src := execengine.Source
+	// Rewrite the package comment so revive's package-comments rule sees a
+	// matching "Package <pkg>" prefix after we change the package declaration.
+	src = strings.Replace(src, "// Package execengine ", "// Package "+pkg+" ", 1)
 	src = strings.Replace(src, "package execengine\n", "package "+pkg+"\n", 1)
 	// Strip the source.go embed directive line — it's in a separate file.
 	// (execengine.go does not contain any embed directives itself, so no-op.)

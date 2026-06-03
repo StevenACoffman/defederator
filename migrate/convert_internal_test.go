@@ -8,7 +8,7 @@ import (
 )
 
 func TestDefederatorYAML_Basic(t *testing.T) {
-	in := YAMLInput{
+	in := &YAMLInput{
 		Genqlient: GenqlientConfig{
 			Schema:     "../../gengraphql/composed_schema.graphql",
 			Operations: []string{"cross_service/*.go", "tasks/*.go"},
@@ -39,7 +39,7 @@ func TestDefederatorYAML_Basic(t *testing.T) {
 }
 
 func TestDefederatorYAML_WithBindings(t *testing.T) {
-	in := YAMLInput{
+	in := &YAMLInput{
 		Genqlient: GenqlientConfig{
 			Schema:    "../../schema.graphql",
 			Generated: "generated/genqlient/queries.go",
@@ -76,7 +76,7 @@ func TestDefederatorYAML_WithBindings(t *testing.T) {
 }
 
 func TestDefederatorYAML_WithEnums(t *testing.T) {
-	in := YAMLInput{
+	in := &YAMLInput{
 		Genqlient: GenqlientConfig{
 			Schema:    "../../schema.graphql",
 			Generated: "generated/genqlient/queries.go",
@@ -100,7 +100,7 @@ func TestDefederatorYAML_WithEnums(t *testing.T) {
 }
 
 func TestDefederatorYAML_WithInputObjects(t *testing.T) {
-	in := YAMLInput{
+	in := &YAMLInput{
 		Genqlient: GenqlientConfig{
 			Schema:    "../../schema.graphql",
 			Generated: "generated/genqlient/queries.go",
@@ -127,7 +127,7 @@ func TestDefederatorYAML_WithInputObjects(t *testing.T) {
 }
 
 func TestDefederatorYAML_NoSchema(t *testing.T) {
-	_, err := DefederatorYAML(YAMLInput{})
+	_, err := DefederatorYAML(&YAMLInput{})
 	if err == nil {
 		t.Fatal("expected error for missing schema")
 	}

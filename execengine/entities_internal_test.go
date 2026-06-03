@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+// entitiesProtocolCase mirrors the table entry for TestEntities_Protocol.
+type entitiesProtocolCase struct {
+	parentObj       map[string]any
+	parentPathKey   string
+	typeName        string
+	keyFields       []string
+	requiresFields  []string
+	isParentList    bool
+	entityResp      json.RawMessage
+	wantRepCount    int
+	wantRepTypeName string
+	wantRepKeyField string
+	wantRepKeyValue any
+	wantRepReqField string
+	wantRepReqValue any
+	wantMergedKey   string
+	wantMergedValue any
+}
+
 // captureRequest starts a server that saves the most recent request body and
 // returns response on every call. The returned getBody func returns the last
 // captured body. Callers own starting/stopping via defer srv.Close().
@@ -47,31 +66,7 @@ func TestEntities_Protocol(t *testing.T) {
 		return httptest.NewServer(jsonResp(t, map[string]any{pathKey: obj}))
 	}
 
-	cases := map[string]struct {
-		// parent object returned by the initial fetch
-		parentObj     map[string]any
-		parentPathKey string // top-level key in initial fetch response
-
-		// EntityFetch configuration
-		typeName       string
-		keyFields      []string
-		requiresFields []string
-		isParentList   bool
-
-		// entity server response (one entity per parent item)
-		entityResp json.RawMessage
-
-		// assertions on the captured _entities request
-		wantRepCount    int
-		wantRepTypeName string
-		wantRepKeyField string
-		wantRepKeyValue any
-		wantRepReqField string // requiresField that must appear in representation
-		wantRepReqValue any
-		// merged result assertion
-		wantMergedKey   string
-		wantMergedValue any
-	}{
+	cases := map[string]entitiesProtocolCase{
 		"typename_always_present": {
 			parentObj:       map[string]any{"id": "p1"},
 			parentPathKey:   "product",
@@ -121,89 +116,83 @@ func TestEntities_Protocol(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			// Initial fetch server returns parent object.
-			initSrv := parentServer(t, tc.parentPathKey, tc.parentObj)
-			defer initSrv.Close()
-
-			// Entity fetch server: captures request, returns canned entity response.
-			entitySrv, getBody := captureRequest(t, tc.entityResp)
-			defer entitySrv.Close()
-
-			plan := &Plan{
-				Fetches: []Fetch{
-					{
-						URL:   initSrv.URL,
-						Query: `{ result { id email totalProductsCreated extraField } }`,
-					},
-				},
-				EntityFetches: []EntityFetch{
-					{
-						URL:            entitySrv.URL,
-						TypeName:       tc.typeName,
-						KeyFields:      tc.keyFields,
-						RequiresFields: tc.requiresFields,
-						Selection:      tc.wantMergedKey + "\n",
-						ParentPath:     []string{tc.parentPathKey},
-						IsParentList:   tc.isParentList,
-					},
-				},
-				Projection: []*FieldProjection{
-					{Key: tc.parentPathKey},
-				},
-			}
-			_, _, err := execute(context.Background(), plan, nil, nil, false)
-			if err != nil {
-				t.Fatalf("Execute: %v", err)
-			}
-
-			// Decode the captured _entities request.
-			body := getBody()
-			if len(body) == 0 {
-				t.Fatal("entity server was not called")
-			}
-			var req struct {
-				Variables struct {
-					Representations []map[string]any `json:"representations"`
-				} `json:"variables"`
-			}
-			if err := json.Unmarshal(body, &req); err != nil {
-				t.Fatalf("decode captured request: %v", err)
-			}
-
-			reps := req.Variables.Representations
-			if len(reps) != tc.wantRepCount {
-				t.Fatalf("representation count: got %d, want %d", len(reps), tc.wantRepCount)
-			}
-
-			rep := reps[0]
-			if rep["__typename"] != tc.wantRepTypeName {
-				t.Errorf("__typename: got %v, want %q", rep["__typename"], tc.wantRepTypeName)
-			}
-			if rep[tc.wantRepKeyField] != tc.wantRepKeyValue {
-				t.Errorf(
-					"key field %q: got %v, want %v",
-					tc.wantRepKeyField,
-					rep[tc.wantRepKeyField],
-					tc.wantRepKeyValue,
-				)
-			}
-			if tc.wantRepReqField != "" {
-				if rep[tc.wantRepReqField] != tc.wantRepReqValue {
-					t.Errorf(
-						"requires field %q: got %v, want %v",
-						tc.wantRepReqField,
-						rep[tc.wantRepReqField],
-						tc.wantRepReqValue,
-					)
-				}
-			}
-			// extraField must NOT appear in the representation (only key + requires fields).
-			if _, ok := rep["extraField"]; ok {
-				t.Error(
-					"extraField should not appear in representation — only key and requires fields allowed",
-				)
-			}
+			tc := tc
+			runEntitiesProtocolCase(t, &tc, parentServer)
 		})
+	}
+}
+
+// runEntitiesProtocolCase executes one TestEntities_Protocol subtest.
+func runEntitiesProtocolCase(
+	t *testing.T,
+	tc *entitiesProtocolCase,
+	parentServer func(*testing.T, string, map[string]any) *httptest.Server,
+) {
+	t.Helper()
+	initSrv := parentServer(t, tc.parentPathKey, tc.parentObj)
+	defer initSrv.Close()
+	entitySrv, getBody := captureRequest(t, tc.entityResp)
+	defer entitySrv.Close()
+
+	plan := &Plan{
+		Fetches: []Fetch{{
+			URL:   initSrv.URL,
+			Query: `{ result { id email totalProductsCreated extraField } }`,
+		}},
+		EntityFetches: []EntityFetch{{
+			URL:            entitySrv.URL,
+			TypeName:       tc.typeName,
+			KeyFields:      tc.keyFields,
+			RequiresFields: tc.requiresFields,
+			Selection:      tc.wantMergedKey + "\n",
+			ParentPath:     []string{tc.parentPathKey},
+			IsParentList:   tc.isParentList,
+		}},
+		Projection: []*FieldProjection{{Key: tc.parentPathKey}},
+	}
+	if _, _, err := execute(context.Background(), plan, nil, nil, false); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	assertCapturedRep(t, getBody(), tc)
+}
+
+// (table type entitiesProtocolCase is declared near the top of the file)
+
+// assertCapturedRep decodes the captured _entities request body and verifies
+// the representation matches the expected typename / key / requires fields.
+func assertCapturedRep(t *testing.T, body []byte, tc *entitiesProtocolCase) {
+	t.Helper()
+	if len(body) == 0 {
+		t.Fatal("entity server was not called")
+	}
+	var req struct {
+		Variables struct {
+			Representations []map[string]any `json:"representations"`
+		} `json:"variables"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatalf("decode captured request: %v", err)
+	}
+	reps := req.Variables.Representations
+	if len(reps) != tc.wantRepCount {
+		t.Fatalf("representation count: got %d, want %d", len(reps), tc.wantRepCount)
+	}
+	rep := reps[0]
+	if rep["__typename"] != tc.wantRepTypeName {
+		t.Errorf("__typename: got %v, want %q", rep["__typename"], tc.wantRepTypeName)
+	}
+	if rep[tc.wantRepKeyField] != tc.wantRepKeyValue {
+		t.Errorf("key field %q: got %v, want %v",
+			tc.wantRepKeyField, rep[tc.wantRepKeyField], tc.wantRepKeyValue)
+	}
+	if tc.wantRepReqField != "" && rep[tc.wantRepReqField] != tc.wantRepReqValue {
+		t.Errorf("requires field %q: got %v, want %v",
+			tc.wantRepReqField, rep[tc.wantRepReqField], tc.wantRepReqValue)
+	}
+	if _, ok := rep["extraField"]; ok {
+		t.Error(
+			"extraField should not appear in representation — only key and requires fields allowed",
+		)
 	}
 }
 

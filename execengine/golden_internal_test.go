@@ -240,52 +240,74 @@ func TestGoldenFixtures(t *testing.T) {
 	for _, fx := range fixtures {
 		fx := fx
 		t.Run(fx.name, func(t *testing.T) {
-			// Start one scripted server per subgraph with its ordered call sequence.
-			urlMap := make(map[string]string, len(fx.calls))
-			var servers []*httptest.Server
-			for subgraph, calls := range fx.calls {
-				srv := scriptedServer(t, calls)
-				servers = append(servers, srv)
-				urlMap[subgraph] = srv.URL
-			}
-			defer func() {
-				for _, srv := range servers {
-					srv.Close()
-				}
-			}()
-
-			// Patch the supergraph SDL with test server URLs and build the plan.
-			patchedSDL := patchSupergraphURLs(string(sdlBytes), urlMap)
-			sg, err := federation.ParseSchema(patchedSDL)
-			if err != nil {
-				t.Fatalf("ParseSchema: %v", err)
-			}
-			plan, err := federation.BuildPlan(sg, fx.query, "")
-			if err != nil {
-				t.Fatalf("BuildPlan: %v", err)
-			}
-
-			epPlan := planToExecPlan(t, plan)
-
-			raw, errs, err := execute(context.Background(), epPlan, fx.vars, nil, false)
-			if err != nil {
-				t.Fatalf("Execute: %v", err)
-			}
-			if len(errs) > 0 {
-				t.Fatalf("GraphQL errors: %v", errs)
-			}
-
-			// Layer 3: merged output must match expected.json["data"].
-			// Unmarshal both sides into map[string]any for order-independent comparison.
-			gotData := mergedToMap(t, raw)
-			wantData, _ := fx.expected["data"].(map[string]any)
-			if !reflect.DeepEqual(gotData, wantData) {
-				gotJSON, _ := json.MarshalIndent(gotData, "", "  ")
-				wantJSON, _ := json.MarshalIndent(wantData, "", "  ")
-				t.Errorf("merged output mismatch:\ngot:\n%s\nwant:\n%s", gotJSON, wantJSON)
-			}
+			runGoldenFixture(t, fx, sdlBytes)
 		})
 	}
+}
+
+// runGoldenFixture executes one golden-fixture subtest. Factored out to keep
+// TestGoldenFixtures under the cognitive-complexity cap.
+func runGoldenFixture(t *testing.T, fx goldenFixture, sdlBytes []byte) {
+	t.Helper()
+	urlMap, closeAll := startSubgraphServers(t, fx.calls)
+	defer closeAll()
+	epPlan := buildGoldenPlan(t, string(sdlBytes), urlMap, fx.query)
+	raw, errs, err := execute(context.Background(), epPlan, fx.vars, nil, false)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if len(errs) > 0 {
+		t.Fatalf("GraphQL errors: %v", errs)
+	}
+	gotData := mergedToMap(t, raw)
+	wantData, _ := fx.expected["data"].(map[string]any)
+	if !reflect.DeepEqual(gotData, wantData) {
+		gotJSON, _ := json.MarshalIndent(gotData, "", "  ")
+		wantJSON, _ := json.MarshalIndent(wantData, "", "  ")
+		t.Errorf("merged output mismatch:\ngot:\n%s\nwant:\n%s", gotJSON, wantJSON)
+	}
+}
+
+// startSubgraphServers starts one scripted server per subgraph with its
+// ordered call sequence. Returns the subgraph→URL map and a cleanup func.
+func startSubgraphServers(
+	t *testing.T,
+	calls map[string][]scriptedCall,
+) (map[string]string, func()) {
+	t.Helper()
+	urlMap := make(map[string]string, len(calls))
+	var servers []*httptest.Server
+	for subgraph, cs := range calls {
+		srv := scriptedServer(t, cs)
+		servers = append(servers, srv)
+		urlMap[subgraph] = srv.URL
+	}
+	return urlMap, func() {
+		for _, srv := range servers {
+			srv.Close()
+		}
+	}
+}
+
+// buildGoldenPlan patches the supergraph SDL with the test server URLs and
+// builds the executable plan for the given query.
+func buildGoldenPlan(
+	t *testing.T,
+	sdl string,
+	urlMap map[string]string,
+	query string,
+) *Plan {
+	t.Helper()
+	patchedSDL := patchSupergraphURLs(sdl, urlMap)
+	sg, err := federation.ParseSchema(patchedSDL)
+	if err != nil {
+		t.Fatalf("ParseSchema: %v", err)
+	}
+	plan, err := federation.BuildPlan(sg, query, "")
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	return planToExecPlan(t, plan)
 }
 
 // planToExecPlan converts a *federation.Plan to *Plan by directly

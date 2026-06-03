@@ -90,23 +90,84 @@ func (p *Plugin) Name() string { return "clientgen" }
 
 // MutateConfig mirrors clientgenv2.Plugin.MutateConfig but calls RenderFederationTemplate.
 func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
-	queryDocument := p.queryDocument
-	if queryDocument == nil {
-		querySources, err := parsequery.LoadQuerySources(p.queryFilePaths)
-		if err != nil {
-			return fmt.Errorf("gqlgencfed: load query sources: %w", err)
-		}
-		queryDocument, err = parsequery.ParseQueryDocuments(cfg.Schema, querySources)
-		if err != nil {
-			return fmt.Errorf("gqlgencfed: parse query documents: %w", err)
-		}
+	queryDocument, err := p.resolveQueryDocument(cfg)
+	if err != nil {
+		return err
 	}
+	enums := registerBasicModels(cfg, p.client)
+	operationQueryDocuments, err := p.resolveOperationQueryDocuments(cfg, queryDocument)
+	if err != nil {
+		return err
+	}
+	sourceGenerator := clientgenv2.NewSourceGenerator(cfg, p.client, p.generateConfig)
+	source := clientgenv2.NewSource(cfg.Schema, queryDocument, sourceGenerator, p.generateConfig)
+	fragments, operationResponses, operations, err := loadSourceArtifacts(
+		source,
+		operationQueryDocuments,
+	)
+	if err != nil {
+		return err
+	}
+	planSpecs, err := buildPluginPlanSpecs(p.supergraphSDL, operations)
+	if err != nil {
+		return err
+	}
+	if err := generator.RenderFederationTemplate(
+		cfg, fragments, operations, operationResponses, source.ResponseSubTypes(),
+		p.generateConfig, p.client, planSpecs, "baked", enums, nil,
+	); err != nil {
+		return fmt.Errorf("gqlgencfed: render template: %w", err)
+	}
+	if err := generator.WriteExecFile(
+		filepath.Dir(p.client.Filename),
+		p.client.Package,
+	); err != nil {
+		return fmt.Errorf("gqlgencfed: write exec file: %w", err)
+	}
+	return nil
+}
 
-	// Same model-binding step as generator.Generate: fill in INPUT_OBJECT and
-	// ENUM models that the user hasn't bound explicitly. Without this,
-	// SourceGenerator.Type panics on any enum used in a response field.
+// resolveQueryDocument returns p.queryDocument if non-nil, otherwise parses
+// the configured query file paths against cfg.Schema.
+func (p *Plugin) resolveQueryDocument(cfg *gqlgenConfig.Config) (*ast.QueryDocument, error) {
+	if p.queryDocument != nil {
+		return p.queryDocument, nil
+	}
+	querySources, err := parsequery.LoadQuerySources(p.queryFilePaths)
+	if err != nil {
+		return nil, fmt.Errorf("gqlgencfed: load query sources: %w", err)
+	}
+	queryDocument, err := parsequery.ParseQueryDocuments(cfg.Schema, querySources)
+	if err != nil {
+		return nil, fmt.Errorf("gqlgencfed: parse query documents: %w", err)
+	}
+	return queryDocument, nil
+}
+
+// resolveOperationQueryDocuments returns p.operationQueryDocuments if set,
+// otherwise builds per-operation documents from queryDocument.Operations.
+func (p *Plugin) resolveOperationQueryDocuments(
+	cfg *gqlgenConfig.Config,
+	queryDocument *ast.QueryDocument,
+) ([]*ast.QueryDocument, error) {
+	if p.operationQueryDocuments != nil {
+		return p.operationQueryDocuments, nil
+	}
+	out, err := querydocument.QueryDocumentsByOperations(cfg.Schema, queryDocument.Operations)
+	if err != nil {
+		return nil, fmt.Errorf("gqlgencfed: build per-operation documents: %w", err)
+	}
+	return out, nil
+}
+
+// registerBasicModels installs the same INPUT_OBJECT / ENUM bindings the
+// generator's Generate function registers. Returns the declared enum set.
+func registerBasicModels(
+	cfg *gqlgenConfig.Config,
+	client gqlgenConfig.PackageConfig,
+) []*generator.EnumDef {
 	enums := generator.CollectEnums(cfg.Schema)
-	basicModels := generator.BasicTypeModels(cfg.Schema, p.client.ImportPath())
+	basicModels := generator.BasicTypeModels(cfg.Schema, client.ImportPath())
 	if cfg.Models == nil {
 		cfg.Models = make(gqlgenConfig.TypeMap, len(basicModels))
 	}
@@ -115,77 +176,50 @@ func (p *Plugin) MutateConfig(cfg *gqlgenConfig.Config) error {
 			cfg.Models[name] = entry
 		}
 	}
+	return enums
+}
 
-	operationQueryDocuments := p.operationQueryDocuments
-	if operationQueryDocuments == nil {
-		var err error
-		operationQueryDocuments, err = querydocument.QueryDocumentsByOperations(
-			cfg.Schema,
-			queryDocument.Operations,
-		)
-		if err != nil {
-			return fmt.Errorf("gqlgencfed: build per-operation documents: %w", err)
-		}
-	}
-
-	sourceGenerator := clientgenv2.NewSourceGenerator(cfg, p.client, p.generateConfig)
-	source := clientgenv2.NewSource(cfg.Schema, queryDocument, sourceGenerator, p.generateConfig)
-
+// loadSourceArtifacts runs the three gqlgenc source generators in order.
+func loadSourceArtifacts(
+	source *clientgenv2.Source,
+	operationQueryDocuments []*ast.QueryDocument,
+) ([]*clientgenv2.Fragment, []*clientgenv2.OperationResponse, []*clientgenv2.Operation, error) {
 	fragments, err := source.Fragments()
 	if err != nil {
-		return fmt.Errorf("gqlgencfed: generate fragments: %w", err)
+		return nil, nil, nil, fmt.Errorf("gqlgencfed: generate fragments: %w", err)
 	}
-
 	operationResponses, err := source.OperationResponses()
 	if err != nil {
-		return fmt.Errorf("gqlgencfed: generate operation responses: %w", err)
+		return nil, nil, nil, fmt.Errorf("gqlgencfed: generate operation responses: %w", err)
 	}
-
 	operations, err := source.Operations(operationQueryDocuments)
 	if err != nil {
-		return fmt.Errorf("gqlgencfed: generate operations: %w", err)
+		return nil, nil, nil, fmt.Errorf("gqlgencfed: generate operations: %w", err)
 	}
+	return fragments, operationResponses, operations, nil
+}
 
-	sg, err := federation.ParseSchema(p.supergraphSDL)
+// buildPluginPlanSpecs marshals one URL-keyed plan spec per operation against
+// the supergraph SDL.
+func buildPluginPlanSpecs(
+	supergraphSDL string,
+	operations []*clientgenv2.Operation,
+) (map[string]string, error) {
+	sg, err := federation.ParseSchema(supergraphSDL)
 	if err != nil {
-		return fmt.Errorf("gqlgencfed: parse supergraph: %w", err)
+		return nil, fmt.Errorf("gqlgencfed: parse supergraph: %w", err)
 	}
-
 	planSpecs := make(map[string]string, len(operations))
 	for _, op := range operations {
 		plan, err := federation.BuildPlan(sg, op.Operation, op.Name)
 		if err != nil {
-			return fmt.Errorf("gqlgencfed: plan %q: %w", op.Name, err)
+			return nil, fmt.Errorf("gqlgencfed: plan %q: %w", op.Name, err)
 		}
 		specJSON, err := generator.MarshalURLPlanSpec(plan)
 		if err != nil {
-			return fmt.Errorf("gqlgencfed: marshal plan spec %q: %w", op.Name, err)
+			return nil, fmt.Errorf("gqlgencfed: marshal plan spec %q: %w", op.Name, err)
 		}
 		planSpecs[op.Name] = specJSON
 	}
-
-	if err := generator.RenderFederationTemplate(
-		cfg,
-		fragments,
-		operations,
-		operationResponses,
-		source.ResponseSubTypes(),
-		p.generateConfig,
-		p.client,
-		planSpecs,
-		"baked",
-		enums,
-		nil,
-	); err != nil {
-		return fmt.Errorf("gqlgencfed: render template: %w", err)
-	}
-
-	if err := generator.WriteExecFile(
-		filepath.Dir(p.client.Filename),
-		p.client.Package,
-	); err != nil {
-		return fmt.Errorf("gqlgencfed: write exec file: %w", err)
-	}
-
-	return nil
+	return planSpecs, nil
 }

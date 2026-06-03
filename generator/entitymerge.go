@@ -11,6 +11,13 @@ import (
 	"github.com/gqlgo/gqlgenc/clientgenv2"
 )
 
+// efMeta is per-entity-fetch state used during code generation.
+type efMeta struct {
+	ef       *urlSpecEntityFetch
+	steps    []chainStep
+	keyInfos []keyFieldInfo // set only in optimized path
+}
+
 // chainStep describes one Go struct field traversal step when following a parentPath.
 type chainStep struct {
 	GoName       string
@@ -122,7 +129,8 @@ func walkTypeForChain(t types.Type, path []string) ([]chainStep, error) {
 // requiresFields for entity fetch N come from entity fetch N-1's selection (not from
 // the initial fetch). Generation falls back to ExecuteAndUnmarshal in this case.
 func isFieldFromPriorEntityFetch(fieldName string, prior []urlSpecEntityFetch) bool {
-	for _, ef := range prior {
+	for i := range prior {
+		ef := &prior[i]
 		for _, line := range strings.Split(strings.TrimSpace(ef.Selection), "\n") {
 			line = strings.TrimSpace(line)
 			if line == "" || strings.HasPrefix(line, "{") {
@@ -152,6 +160,20 @@ func leafKeyAccessors(
 	path []string,
 	fields []string,
 ) ([]keyFieldInfo, error) {
+	leafType, err := walkToLeaf(responseType, path)
+	if err != nil {
+		return nil, err
+	}
+	st := unwrapToStruct(leafType)
+	if st == nil {
+		return nil, errors.New("generator: leafKeyAccessors: leaf type is not a struct")
+	}
+	return resolveLeafFields(st, fields)
+}
+
+// walkToLeaf advances responseType along path, unwrapping pointer and slice
+// layers at each step. Returns the element type reached after the last segment.
+func walkToLeaf(responseType types.Type, path []string) (types.Type, error) {
 	cur := responseType
 	for segIdx, seg := range path {
 		st := unwrapToStruct(cur)
@@ -170,23 +192,29 @@ func leafKeyAccessors(
 				segIdx,
 			)
 		}
-		// Advance cur: unwrap pointer, then unwrap slice to element type.
-		if ptr, ok2 := fieldType.(*types.Pointer); ok2 {
-			fieldType = ptr.Elem()
-		}
-		if sl, ok2 := fieldType.(*types.Slice); ok2 {
-			elem := sl.Elem()
-			if ptr, ok3 := elem.(*types.Pointer); ok3 {
-				elem = ptr.Elem()
-			}
-			fieldType = elem
-		}
-		cur = fieldType
+		cur = advanceElementType(fieldType)
 	}
-	st := unwrapToStruct(cur)
-	if st == nil {
-		return nil, errors.New("generator: leafKeyAccessors: leaf type is not a struct")
+	return cur, nil
+}
+
+// advanceElementType unwraps one optional pointer layer, then if a slice,
+// returns the slice element type (also unwrapping any pointer on the element).
+func advanceElementType(fieldType types.Type) types.Type {
+	if ptr, ok := fieldType.(*types.Pointer); ok {
+		fieldType = ptr.Elem()
 	}
+	if sl, ok := fieldType.(*types.Slice); ok {
+		elem := sl.Elem()
+		if ptr, ok := elem.(*types.Pointer); ok {
+			elem = ptr.Elem()
+		}
+		return elem
+	}
+	return fieldType
+}
+
+// resolveLeafFields looks up each requested field on the leaf struct.
+func resolveLeafFields(st *types.Struct, fields []string) ([]keyFieldInfo, error) {
 	result := make([]keyFieldInfo, len(fields))
 	for i, field := range fields {
 		name, fieldType, ok := fieldByJSONKey(st, field)
@@ -309,62 +337,94 @@ func (g *genGettersGenerator) genEntityFetch(
 	if err != nil || len(entityFetches) == 0 {
 		return ""
 	}
+	if hasPriorRequires(entityFetches) {
+		return ""
+	}
+	metas, ok := buildEFMetas(entityFetches, responseType)
+	if !ok {
+		return ""
+	}
+	useOptimized := assignKeyInfos(metas, responseType)
 
-	// Detect Phase C.2: requiresField sourced from a prior entity fetch's selection.
-	for i, ef := range entityFetches {
+	var b strings.Builder
+	if useOptimized {
+		writeOptimizedInitialFetch(&b, opName, respTypeName)
+		for i := range metas {
+			m := &metas[i]
+			g.genSingleEntityFetch(&b, opName, i, m.ef, m.steps, m.keyInfos)
+		}
+		return b.String()
+	}
+	writeLegacyInitialFetch(&b, opName)
+	for i := range metas {
+		m := &metas[i]
+		g.genSingleEntityFetchLegacy(&b, opName, i, m.ef, m.steps)
+	}
+	return b.String()
+}
+
+// hasPriorRequires detects Phase C.2: any requiresField is sourced from a prior
+// entity fetch's selection. The generator falls back to ExecuteAndUnmarshal in
+// that case.
+func hasPriorRequires(entityFetches []urlSpecEntityFetch) bool {
+	for i := range entityFetches {
+		ef := &entityFetches[i]
 		for _, rf := range ef.RequiresFields {
 			if isFieldFromPriorEntityFetch(rf, entityFetches[:i]) {
-				return ""
+				return true
 			}
 		}
 	}
+	return false
+}
 
-	type efMeta struct {
-		ef       urlSpecEntityFetch
-		steps    []chainStep
-		keyInfos []keyFieldInfo // set only in optimized path (keyFields only, no requires)
-	}
+// buildEFMetas walks responseType for each entity fetch's ParentPath. Returns
+// (nil, false) if any walk fails or any intermediate path step is a slice
+// (nested list — Phase C.2 case).
+func buildEFMetas(
+	entityFetches []urlSpecEntityFetch,
+	responseType types.Type,
+) ([]efMeta, bool) {
 	metas := make([]efMeta, 0, len(entityFetches))
-	for _, ef := range entityFetches {
+	for i := range entityFetches {
+		ef := &entityFetches[i]
 		steps, err := walkTypeForChain(responseType, ef.ParentPath)
 		if err != nil {
-			return "" // unknown field in path — fall back to ExecuteAndUnmarshal
+			return nil, false
 		}
-		// Detect intermediate slices (Phase C.2 case — nested list in path).
 		for _, s := range steps[:max(0, len(steps)-1)] {
 			if s.IsSlice {
-				return ""
+				return nil, false
 			}
 		}
 		metas = append(metas, efMeta{ef: ef, steps: steps})
 	}
+	return metas, true
+}
 
-	// Select optimized path only when all entity fetches have no requires fields
-	// AND all key fields can be looked up in the gqlgenc-generated response struct.
-	// @requires fields are planner-injected into the initial fetch query but are not
-	// in the user-selected fields, so the gqlgenc struct does not contain them.
-	useOptimized := true
+// assignKeyInfos populates each meta's keyInfos when the optimized path is
+// available. Returns true if all entity fetches qualify (no requires, all keys
+// resolvable). The legacy path is used when this returns false.
+func assignKeyInfos(metas []efMeta, responseType types.Type) bool {
 	for i := range metas {
 		m := &metas[i]
 		if len(m.ef.RequiresFields) > 0 {
-			useOptimized = false
-			break
+			return false
 		}
 		ki, kerr := leafKeyAccessors(responseType, m.ef.ParentPath, m.ef.KeyFields)
 		if kerr != nil {
-			useOptimized = false
-			break
+			return false
 		}
 		m.keyInfos = ki
 	}
+	return true
+}
 
-	var b strings.Builder
-
-	if useOptimized {
-		// Fix 1: single-pass initial fetch decode. Pre-set _wr.Data = &res so
-		// json.Unmarshal populates the typed struct directly without an intermediate
-		// json.RawMessage allocation.
-		b.WriteString(`{
+// writeOptimizedInitialFetch emits the optimized initial-fetch block.
+// Single-pass decode: _wr.Data = &res so json.Unmarshal populates the typed
+// struct directly without an intermediate json.RawMessage allocation.
+func writeOptimizedInitialFetch(b *strings.Builder, opName, respTypeName string) {
+	b.WriteString(`{
 _f := plan.Fetches[0]
 _rb, _err := httpPost(ctx, c.httpFor(ctx), _f.URL, _f.Query, "", filterVars(_opVars, _f.Variables))
 if _err != nil {
@@ -383,14 +443,13 @@ return nil, fmt.Errorf("` + opName + `: %v", _wr.Errors)
 }
 }
 `)
-		for i, m := range metas {
-			g.genSingleEntityFetch(&b, opName, i, m.ef, m.steps, m.keyInfos)
-		}
-	} else {
-		// Legacy typed path: two-step initial decode keeping _raw for key/requires
-		// extraction. Used when @requires fields are present or key lookup fails.
-		// _raw is declared at function scope so subsequent entity fetch blocks can read it.
-		b.WriteString(`var _raw json.RawMessage
+}
+
+// writeLegacyInitialFetch emits the legacy two-step initial-fetch block. _raw
+// is declared at function scope so subsequent entity fetch blocks can read it
+// for key and @requires field extraction.
+func writeLegacyInitialFetch(b *strings.Builder, opName string) {
+	b.WriteString(`var _raw json.RawMessage
 {
 _f := plan.Fetches[0]
 _rb, _err := httpPost(ctx, c.httpFor(ctx), _f.URL, _f.Query, "", filterVars(_opVars, _f.Variables))
@@ -415,12 +474,6 @@ return nil, fmt.Errorf("` + opName + `: decode typed response: %w", _rerr)
 }
 }
 `)
-		for i, m := range metas {
-			g.genSingleEntityFetchLegacy(&b, opName, i, m.ef, m.steps)
-		}
-	}
-
-	return b.String()
 }
 
 // genSingleEntityFetch appends the code block for one entity fetch to b.
@@ -430,171 +483,198 @@ func (g *genGettersGenerator) genSingleEntityFetch(
 	b *strings.Builder,
 	opName string,
 	idx int,
-	ef urlSpecEntityFetch,
+	ef *urlSpecEntityFetch,
 	steps []chainStep,
 	keyInfos []keyFieldInfo,
 ) {
 	idxS := strconv.Itoa(idx)
 	allKeys := append(append([]string{}, ef.KeyFields...), ef.RequiresFields...)
-	p := fmt.Sprintf("_ef%d", idx) // variable prefix for this entity fetch
-
+	p := fmt.Sprintf("_ef%d", idx)
 	chain := genAccessChain(steps)
 	nilGuard := genNilGuard(steps)
 	lastStep := steps[len(steps)-1]
-	keyAccess := chain // direct res.* access — no separate key extraction struct
 
 	b.WriteString("{\n")
-
 	if ef.IsParentList {
-		// 2a. List parent: build rep slice from res.* directly.
-		// nilGuard protects intermediate pointer steps before the slice field.
-		if nilGuard != "" {
-			b.WriteString("if " + nilGuard + " {\n")
-		}
-		b.WriteString(p + "reps := make([]map[string]any, 0, len(" + keyAccess + "))\n")
-		b.WriteString("for _i, _u := range " + keyAccess + " {\n")
-		if lastStep.SliceElemPtr {
-			b.WriteString("if _u == nil {\n")
-			b.WriteString(
-				"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": nil element at index %d\", _i)\n",
-			)
-			b.WriteString("}\n")
-		}
-		for ki, kf := range ef.KeyFields {
-			if keyInfos[ki].isPtr {
-				b.WriteString("if _u." + keyInfos[ki].goName + " == nil {\n")
-				b.WriteString(
-					"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + kf + " nil at index %d\", _i)\n",
-				)
-				b.WriteString("}\n")
-			}
-		}
-		b.WriteString(
-			p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"",
-		)
-		for i, kf := range allKeys {
-			b.WriteString(", \"" + kf + "\": _u." + keyInfos[i].goName)
-		}
-		b.WriteString("})\n")
-		b.WriteString("}\n") // end for
-
-		// 3. Entity query dispatch (only if there are reps).
-		b.WriteString("if len(" + p + "reps) > 0 {\n")
-		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
-		b.WriteString(
-			"\"\", buildEntityFetchVars(" + p + "reps, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
-		)
-		b.WriteString(
-			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
-		)
-		b.WriteString(
-			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
-		)
-		b.WriteString(
-			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
-		)
-		b.WriteString(
-			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
-		)
-		b.WriteString("}\n")
-		b.WriteString(
-			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
-		)
-
-		// 4a. Merge into list. No inner nilGuard — already inside the outer one.
-		b.WriteString("for _i, _eraw := range " + p + "w.Data.Entities {\n")
-		b.WriteString("if _i < len(" + chain + ") {\n")
-		if lastStep.SliceElemPtr {
-			b.WriteString("if " + chain + "[_i] != nil {\n")
-			b.WriteString("if _merr := json.Unmarshal(_eraw, " + chain + "[_i]); _merr != nil {\n")
-			b.WriteString(
-				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
-			)
-			b.WriteString("}\n}\n")
-		} else {
-			b.WriteString("if _merr := json.Unmarshal(_eraw, &" + chain + "[_i]); _merr != nil {\n")
-			b.WriteString(
-				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
-			)
-			b.WriteString("}\n")
-		}
-		b.WriteString("}\n}\n") // end bounds check && entity loop
-
-		b.WriteString("}\n") // end if len(reps) > 0
-		if nilGuard != "" {
-			b.WriteString("}\n") // end nilGuard
-		}
-
+		writeListEntityFetch(b, opName, idxS, p, chain, nilGuard, lastStep, ef, allKeys, keyInfos)
 	} else {
-		// 2b. Single parent: nilGuard protects all intermediate pointer steps;
-		// pointer key fields additionally guard on the key being non-nil.
-		ki0 := keyInfos[0]
+		writeSingleEntityFetch(b, opName, idxS, p, chain, nilGuard, lastStep, ef, allKeys, keyInfos)
+	}
+	b.WriteString("}\n")
+}
 
-		if nilGuard != "" {
-			b.WriteString("if " + nilGuard + " {\n")
-		}
-		if ki0.isPtr {
-			b.WriteString("if " + keyAccess + "." + ki0.goName + " != nil {\n")
-		}
-
-		b.WriteString(p + "rep := map[string]any{\"__typename\": \"" + ef.TypeName + "\"")
-		for i, kf := range allKeys {
-			b.WriteString(", \"" + kf + "\": " + keyAccess + "." + keyInfos[i].goName)
-		}
+// writeListEntityFetch emits the list-parent code block: build a rep slice
+// from res.*, dispatch the entity query, and merge results back per-index.
+func writeListEntityFetch(
+	b *strings.Builder,
+	opName, idxS, p, chain, nilGuard string,
+	lastStep chainStep,
+	ef *urlSpecEntityFetch,
+	allKeys []string,
+	keyInfos []keyFieldInfo,
+) {
+	if nilGuard != "" {
+		b.WriteString("if " + nilGuard + " {\n")
+	}
+	writeListBuildReps(b, opName, idxS, p, chain, lastStep, ef, allKeys, keyInfos)
+	b.WriteString("if len(" + p + "reps) > 0 {\n")
+	writeEntityDispatch(b, opName, idxS, p, ef.TypeName, p+"reps, _opVars")
+	writeListMerge(b, opName, idxS, p, chain, lastStep)
+	b.WriteString("}\n")
+	if nilGuard != "" {
 		b.WriteString("}\n")
+	}
+}
 
-		// 3. Entity query dispatch.
-		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
+// writeListBuildReps emits the loop that builds the representation slice for
+// a list parent, including the nil-element and nil-key guards.
+func writeListBuildReps(
+	b *strings.Builder,
+	opName, idxS, p, chain string,
+	lastStep chainStep,
+	ef *urlSpecEntityFetch,
+	allKeys []string,
+	keyInfos []keyFieldInfo,
+) {
+	b.WriteString(p + "reps := make([]map[string]any, 0, len(" + chain + "))\n")
+	b.WriteString("for _i, _u := range " + chain + " {\n")
+	if lastStep.SliceElemPtr {
+		b.WriteString("if _u == nil {\n")
 		b.WriteString(
-			"\"\", buildEntityFetchVars([]map[string]any{" + p + "rep}, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
-		)
-		b.WriteString(
-			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
-		)
-		b.WriteString(
-			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
-		)
-		b.WriteString(
-			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
-		)
-		b.WriteString(
-			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
+			"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": nil element at index %d\", _i)\n",
 		)
 		b.WriteString("}\n")
-		b.WriteString(
-			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
-		)
-
-		// 4b. Merge into single parent. No inner nilGuard — already inside the outer one.
-		b.WriteString("if len(" + p + "w.Data.Entities) > 0 {\n")
-		if lastStep.IsPtr {
+	}
+	for ki, kf := range ef.KeyFields {
+		if keyInfos[ki].isPtr {
+			b.WriteString("if _u." + keyInfos[ki].goName + " == nil {\n")
 			b.WriteString(
-				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n",
+				"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + kf + " nil at index %d\", _i)\n",
 			)
-		} else {
-			b.WriteString(
-				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n",
-			)
-		}
-		b.WriteString(
-			"return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n",
-		)
-		b.WriteString("}\n")
-		b.WriteString("}\n") // end if len(Entities) > 0
-
-		if ki0.isPtr {
-			b.WriteString("}\n") // end if firstKey != nil
-		}
-		if nilGuard != "" {
-			b.WriteString("}\n") // end nilGuard
+			b.WriteString("}\n")
 		}
 	}
+	b.WriteString(
+		p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"",
+	)
+	for i, kf := range allKeys {
+		b.WriteString(", \"" + kf + "\": _u." + keyInfos[i].goName)
+	}
+	b.WriteString("})\n}\n")
+}
 
-	b.WriteString("}\n") // end outer block
+// writeListMerge emits the loop that unmarshals each entity response into the
+// corresponding parent element by index.
+func writeListMerge(
+	b *strings.Builder,
+	opName, idxS, p, chain string,
+	lastStep chainStep,
+) {
+	b.WriteString("for _i, _eraw := range " + p + "w.Data.Entities {\n")
+	b.WriteString("if _i < len(" + chain + ") {\n")
+	if lastStep.SliceElemPtr {
+		b.WriteString("if " + chain + "[_i] != nil {\n")
+		b.WriteString("if _merr := json.Unmarshal(_eraw, " + chain + "[_i]); _merr != nil {\n")
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
+		)
+		b.WriteString("}\n}\n")
+	} else {
+		b.WriteString("if _merr := json.Unmarshal(_eraw, &" + chain + "[_i]); _merr != nil {\n")
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
+		)
+		b.WriteString("}\n")
+	}
+	b.WriteString("}\n}\n")
+}
+
+// writeSingleEntityFetch emits the single-parent code block: build a single
+// representation, dispatch, and merge the one entity response back.
+func writeSingleEntityFetch(
+	b *strings.Builder,
+	opName, idxS, p, chain, nilGuard string,
+	lastStep chainStep,
+	ef *urlSpecEntityFetch,
+	allKeys []string,
+	keyInfos []keyFieldInfo,
+) {
+	ki0 := keyInfos[0]
+	if nilGuard != "" {
+		b.WriteString("if " + nilGuard + " {\n")
+	}
+	if ki0.isPtr {
+		b.WriteString("if " + chain + "." + ki0.goName + " != nil {\n")
+	}
+	b.WriteString(p + "rep := map[string]any{\"__typename\": \"" + ef.TypeName + "\"")
+	for i, kf := range allKeys {
+		b.WriteString(", \"" + kf + "\": " + chain + "." + keyInfos[i].goName)
+	}
+	b.WriteString("}\n")
+	writeEntityDispatch(
+		b, opName, idxS, p, ef.TypeName,
+		"[]map[string]any{"+p+"rep}, _opVars",
+	)
+	writeSingleMerge(b, opName, idxS, p, chain, lastStep)
+	if ki0.isPtr {
+		b.WriteString("}\n")
+	}
+	if nilGuard != "" {
+		b.WriteString("}\n")
+	}
+}
+
+// writeSingleMerge emits the unmarshal of the single entity response into the
+// parent value (taking pointer-ness of the last step into account).
+func writeSingleMerge(
+	b *strings.Builder,
+	opName, idxS, p, chain string,
+	lastStep chainStep,
+) {
+	b.WriteString("if len(" + p + "w.Data.Entities) > 0 {\n")
+	if lastStep.IsPtr {
+		b.WriteString(
+			"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n",
+		)
+	} else {
+		b.WriteString(
+			"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n",
+		)
+	}
+	b.WriteString(
+		"return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n",
+	)
+	b.WriteString("}\n}\n")
+}
+
+// writeEntityDispatch emits the httpPost + decode boilerplate shared by the
+// list-parent and single-parent paths.
+func writeEntityDispatch(
+	b *strings.Builder,
+	opName, idxS, p, typeName, repsExpr string,
+) {
+	b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
+	b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
+	b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
+	b.WriteString(
+		"\"\", buildEntityFetchVars(" + repsExpr + ", plan.EntityFetches[" + idxS + "].Variables))\n",
+	)
+	b.WriteString(
+		"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + typeName + ": %w\", " + p + "err) }\n",
+	)
+	b.WriteString(
+		"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
+	)
+	b.WriteString(
+		"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
+	)
+	b.WriteString(
+		"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
+	)
+	b.WriteString("}\n")
+	b.WriteString(
+		"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + typeName + ": %v\", " + p + "w.Errors) }\n",
+	)
 }
 
 // genSingleEntityFetchLegacy appends the code block for one entity fetch to b using the
@@ -607,168 +687,152 @@ func (g *genGettersGenerator) genSingleEntityFetchLegacy(
 	b *strings.Builder,
 	opName string,
 	idx int,
-	ef urlSpecEntityFetch,
+	ef *urlSpecEntityFetch,
 	steps []chainStep,
 ) {
 	idxS := strconv.Itoa(idx)
 	allKeys := append(append([]string{}, ef.KeyFields...), ef.RequiresFields...)
 	p := fmt.Sprintf("_ef%d", idx)
-
 	chain := genAccessChain(steps)
 	nilGuard := genNilGuard(steps)
 	lastStep := steps[len(steps)-1]
 	keysVar := p + "keys"
 	keyExtractType := genKeyExtractionStruct(ef.ParentPath, steps, allKeys)
 
-	// Leaf access path within keysVar: _ef0keys.Product (single) or _ef0keys.Products (list).
-	leafAccess := keysVar
-	var leafAccessSb558 strings.Builder
+	var leafAccessSb strings.Builder
 	for _, s := range steps {
-		leafAccessSb558.WriteString("." + s.GoName)
+		leafAccessSb.WriteString("." + s.GoName)
 	}
-	leafAccess += leafAccessSb558.String()
+	leafAccess := keysVar + leafAccessSb.String()
 
 	b.WriteString("{\n")
 	b.WriteString("var " + keysVar + " " + keyExtractType + "\n")
 	b.WriteString("if len(_raw) > 0 { _ = json.Unmarshal(_raw, &" + keysVar + ") }\n")
-
 	if ef.IsParentList {
-		// 2a. List parent: extract key+requires fields from keysVar, build rep slice.
-		b.WriteString(p + "reps := make([]map[string]any, 0, len(" + leafAccess + "))\n")
-		b.WriteString("for _i, _u := range " + leafAccess + " {\n")
-		if len(ef.KeyFields) > 0 {
-			firstKey := ef.KeyFields[0]
-			b.WriteString("if _u." + title(firstKey) + " == nil {\n")
-			b.WriteString(
-				"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + firstKey + " nil at index %d\", _i)\n",
-			)
-			b.WriteString("}\n")
-		}
-		b.WriteString(
-			p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"",
+		writeLegacyListEntityFetch(
+			b,
+			opName,
+			idxS,
+			p,
+			chain,
+			nilGuard,
+			lastStep,
+			leafAccess,
+			ef,
+			allKeys,
 		)
-		for _, kf := range allKeys {
-			b.WriteString(", \"" + kf + "\": _u." + title(kf))
-		}
-		b.WriteString("})\n")
-		b.WriteString("}\n") // end for
-
-		// 3. Entity query dispatch.
-		b.WriteString("if len(" + p + "reps) > 0 {\n")
-		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
-		b.WriteString(
-			"\"\", buildEntityFetchVars(" + p + "reps, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
-		)
-		b.WriteString(
-			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
-		)
-		b.WriteString(
-			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
-		)
-		b.WriteString(
-			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
-		)
-		b.WriteString(
-			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
-		)
-		b.WriteString("}\n")
-		b.WriteString(
-			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
-		)
-
-		// 4a. Merge into list. Merge target is res.* (from genAccessChain), always present.
-		if nilGuard != "" {
-			b.WriteString("if " + nilGuard + " {\n")
-		}
-		b.WriteString("for _i, _eraw := range " + p + "w.Data.Entities {\n")
-		b.WriteString("if _i < len(" + chain + ") {\n")
-		if lastStep.SliceElemPtr {
-			b.WriteString("if " + chain + "[_i] != nil {\n")
-			b.WriteString("if _merr := json.Unmarshal(_eraw, " + chain + "[_i]); _merr != nil {\n")
-			b.WriteString(
-				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
-			)
-			b.WriteString("}\n}\n")
-		} else {
-			b.WriteString("if _merr := json.Unmarshal(_eraw, &" + chain + "[_i]); _merr != nil {\n")
-			b.WriteString(
-				"return nil, fmt.Errorf(\"" + opName + ": merge " + idxS + " index %d: %w\", _i, _merr)\n",
-			)
-			b.WriteString("}\n")
-		}
-		b.WriteString("}\n}\n")
-		if nilGuard != "" {
-			b.WriteString("}\n")
-		}
-		b.WriteString("}\n") // end if len(reps) > 0
-
 	} else {
-		// 2b. Single parent: nil check on first key field (any type → nil when absent).
-		if len(ef.KeyFields) > 0 {
-			firstKey := ef.KeyFields[0]
-			b.WriteString("if " + leafAccess + "." + title(firstKey) + " != nil {\n")
-		}
-		b.WriteString(p + "rep := map[string]any{\"__typename\": \"" + ef.TypeName + "\"")
-		for _, kf := range allKeys {
-			b.WriteString(", \"" + kf + "\": " + leafAccess + "." + title(kf))
-		}
-		b.WriteString("}\n")
-
-		// 3. Entity query dispatch.
-		b.WriteString(p + "bytes, " + p + "err := httpPost(ctx, c.httpFor(ctx),\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].URL,\n")
-		b.WriteString("plan.EntityFetches[" + idxS + "].Query,\n")
-		b.WriteString(
-			"\"\", buildEntityFetchVars([]map[string]any{" + p + "rep}, _opVars, plan.EntityFetches[" + idxS + "].Variables))\n",
+		writeLegacySingleEntityFetch(
+			b,
+			opName,
+			idxS,
+			p,
+			chain,
+			nilGuard,
+			lastStep,
+			leafAccess,
+			ef,
+			allKeys,
 		)
-		b.WriteString(
-			"if " + p + "err != nil { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %w\", " + p + "err) }\n",
-		)
-		b.WriteString(
-			"var " + p + "w struct{ Data struct{ Entities []json.RawMessage `json:\"_entities\"` } `json:\"data\"`; Errors []GraphQLError `json:\"errors,omitempty\"` }\n",
-		)
-		b.WriteString(
-			"if " + p + "uerr := json.Unmarshal(" + p + "bytes, &" + p + "w); " + p + "uerr != nil {\n",
-		)
-		b.WriteString(
-			"return nil, fmt.Errorf(\"" + opName + ": decode entities " + idxS + ": %w\", " + p + "uerr)\n",
-		)
-		b.WriteString("}\n")
-		b.WriteString(
-			"if len(" + p + "w.Errors) > 0 { return nil, fmt.Errorf(\"" + opName + ": entity " + idxS + " " + ef.TypeName + ": %v\", " + p + "w.Errors) }\n",
-		)
-
-		// 4b. Merge into single parent. nilGuard protects intermediate pointer steps.
-		b.WriteString("if len(" + p + "w.Data.Entities) > 0 {\n")
-		if nilGuard != "" {
-			b.WriteString("if " + nilGuard + " {\n")
-		}
-		if lastStep.IsPtr {
-			b.WriteString(
-				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n",
-			)
-		} else {
-			b.WriteString(
-				"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n",
-			)
-		}
-		b.WriteString(
-			"return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n",
-		)
-		b.WriteString("}\n")
-		if nilGuard != "" {
-			b.WriteString("}\n")
-		}
-		b.WriteString("}\n") // end if len(Entities) > 0
-
-		if len(ef.KeyFields) > 0 {
-			b.WriteString("}\n") // end if firstKey != nil
-		}
 	}
+	b.WriteString("}\n")
+}
 
-	b.WriteString("}\n") // end outer block
+// writeLegacyListEntityFetch emits the list-parent code block for the legacy
+// path: extract key/requires fields from the key-extraction struct, dispatch,
+// and merge results back into res.* by index.
+func writeLegacyListEntityFetch(
+	b *strings.Builder,
+	opName, idxS, p, chain, nilGuard string,
+	lastStep chainStep,
+	leafAccess string,
+	ef *urlSpecEntityFetch,
+	allKeys []string,
+) {
+	b.WriteString(p + "reps := make([]map[string]any, 0, len(" + leafAccess + "))\n")
+	b.WriteString("for _i, _u := range " + leafAccess + " {\n")
+	if len(ef.KeyFields) > 0 {
+		firstKey := ef.KeyFields[0]
+		b.WriteString("if _u." + title(firstKey) + " == nil {\n")
+		b.WriteString(
+			"return nil, fmt.Errorf(\"" + opName + ": entity fetch " + idxS + ": key " + firstKey + " nil at index %d\", _i)\n",
+		)
+		b.WriteString("}\n")
+	}
+	b.WriteString(
+		p + "reps = append(" + p + "reps, map[string]any{\"__typename\": \"" + ef.TypeName + "\"",
+	)
+	for _, kf := range allKeys {
+		b.WriteString(", \"" + kf + "\": _u." + title(kf))
+	}
+	b.WriteString("})\n}\n")
+
+	b.WriteString("if len(" + p + "reps) > 0 {\n")
+	writeEntityDispatch(b, opName, idxS, p, ef.TypeName, p+"reps, _opVars")
+	if nilGuard != "" {
+		b.WriteString("if " + nilGuard + " {\n")
+	}
+	writeListMerge(b, opName, idxS, p, chain, lastStep)
+	if nilGuard != "" {
+		b.WriteString("}\n")
+	}
+	b.WriteString("}\n")
+}
+
+// writeLegacySingleEntityFetch emits the single-parent code block for the
+// legacy path: extract one rep from keysVar, dispatch, merge into res.*.
+func writeLegacySingleEntityFetch(
+	b *strings.Builder,
+	opName, idxS, p, chain, nilGuard string,
+	lastStep chainStep,
+	leafAccess string,
+	ef *urlSpecEntityFetch,
+	allKeys []string,
+) {
+	if len(ef.KeyFields) > 0 {
+		firstKey := ef.KeyFields[0]
+		b.WriteString("if " + leafAccess + "." + title(firstKey) + " != nil {\n")
+	}
+	b.WriteString(p + "rep := map[string]any{\"__typename\": \"" + ef.TypeName + "\"")
+	for _, kf := range allKeys {
+		b.WriteString(", \"" + kf + "\": " + leafAccess + "." + title(kf))
+	}
+	b.WriteString("}\n")
+	writeEntityDispatch(b, opName, idxS, p, ef.TypeName, "[]map[string]any{"+p+"rep}, _opVars")
+	writeLegacySingleMerge(b, opName, idxS, p, chain, nilGuard, lastStep)
+	if len(ef.KeyFields) > 0 {
+		b.WriteString("}\n")
+	}
+}
+
+// writeLegacySingleMerge emits the single-parent merge for the legacy path,
+// applying the optional nilGuard inside the len(Entities) check.
+func writeLegacySingleMerge(
+	b *strings.Builder,
+	opName, idxS, p, chain, nilGuard string,
+	lastStep chainStep,
+) {
+	b.WriteString("if len(" + p + "w.Data.Entities) > 0 {\n")
+	if nilGuard != "" {
+		b.WriteString("if " + nilGuard + " {\n")
+	}
+	if lastStep.IsPtr {
+		b.WriteString(
+			"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], " + chain + "); _merr != nil {\n",
+		)
+	} else {
+		b.WriteString(
+			"if _merr := json.Unmarshal(" + p + "w.Data.Entities[0], &" + chain + "); _merr != nil {\n",
+		)
+	}
+	b.WriteString(
+		"return nil, fmt.Errorf(\"" + opName + ": merge entity " + idxS + ": %w\", _merr)\n",
+	)
+	b.WriteString("}\n")
+	if nilGuard != "" {
+		b.WriteString("}\n")
+	}
+	b.WriteString("}\n")
 }
 
 // genEntityFetchFunc returns a template function that generates typed entity merge code

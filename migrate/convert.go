@@ -40,7 +40,7 @@ type YAMLInput struct {
 //   - generate.clientInterfaceName: FederationClient is always added
 //   - generate.optional: pointer is always added
 //   - INPUT_OBJECT types from the supergraph SDL are added as genqlient-package bindings
-func DefederatorYAML(in YAMLInput) (string, error) {
+func DefederatorYAML(in *YAMLInput) (string, error) {
 	gq := in.Genqlient
 	if gq.Schema == "" {
 		return "", errors.New("migrate: genqlient config has no schema field")

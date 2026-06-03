@@ -207,33 +207,42 @@ func TestWalkTypeForChain(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := walkTypeForChain(tc.root, tc.path)
-			if tc.wantErr {
-				if err == nil {
-					t.Error("want error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(got) != len(tc.wantSteps) {
-				t.Fatalf(
-					"steps len: want %d, got %d\nwant: %v\n got: %v",
-					len(tc.wantSteps),
-					len(got),
-					tc.wantSteps,
-					got,
-				)
-			}
-			for i, ws := range tc.wantSteps {
-				gs := got[i]
-				if gs.GoName != ws.GoName || gs.IsPtr != ws.IsPtr || gs.IsSlice != ws.IsSlice ||
-					gs.SliceElemPtr != ws.SliceElemPtr {
-					t.Errorf("step[%d]: want %+v, got %+v", i, ws, gs)
-				}
-			}
+			runWalkTypeForChainCase(t, tc.root, tc.path, tc.wantSteps, tc.wantErr)
 		})
+	}
+}
+
+// runWalkTypeForChainCase executes one TestWalkTypeForChain subtest.
+func runWalkTypeForChainCase(
+	t *testing.T,
+	root types.Type,
+	path []string,
+	wantSteps []chainStep,
+	wantErr bool,
+) {
+	t.Helper()
+	got, err := walkTypeForChain(root, path)
+	if wantErr {
+		if err == nil {
+			t.Error("want error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != len(wantSteps) {
+		t.Fatalf(
+			"steps len: want %d, got %d\nwant: %v\n got: %v",
+			len(wantSteps), len(got), wantSteps, got,
+		)
+	}
+	for i, ws := range wantSteps {
+		gs := got[i]
+		if gs.GoName != ws.GoName || gs.IsPtr != ws.IsPtr || gs.IsSlice != ws.IsSlice ||
+			gs.SliceElemPtr != ws.SliceElemPtr {
+			t.Errorf("step[%d]: want %+v, got %+v", i, ws, gs)
+		}
 	}
 }
 
@@ -420,25 +429,37 @@ func TestLeafKeyAccessors(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := leafKeyAccessors(tc.root, tc.path, tc.fields)
-			if tc.wantErr {
-				if err == nil {
-					t.Error("want error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("len: want %d, got %d", len(tc.want), len(got))
-			}
-			for i, w := range tc.want {
-				if got[i] != w {
-					t.Errorf("[%d]: want %+v, got %+v", i, w, got[i])
-				}
-			}
+			runLeafKeyAccessorsCase(t, tc.root, tc.path, tc.fields, tc.want, tc.wantErr)
 		})
+	}
+}
+
+// runLeafKeyAccessorsCase executes one TestLeafKeyAccessors subtest.
+func runLeafKeyAccessorsCase(
+	t *testing.T,
+	root types.Type,
+	path, fields []string,
+	want []keyFieldInfo,
+	wantErr bool,
+) {
+	t.Helper()
+	got, err := leafKeyAccessors(root, path, fields)
+	if wantErr {
+		if err == nil {
+			t.Error("want error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("len: want %d, got %d", len(want), len(got))
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("[%d]: want %+v, got %+v", i, w, got[i])
+		}
 	}
 }
 

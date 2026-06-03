@@ -92,37 +92,67 @@ func TestExecute_ProtocolEdgeCases(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			srv := httptest.NewServer(tc.handler(t))
-			defer srv.Close()
-
-			ctx := context.Background()
-			if name == "context_precancelled" {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel() // cancel before Execute is called
-			}
-
-			_, errs, err := execute(ctx, simplePlan(srv.URL), nil, nil, false)
-
-			if tc.wantTransErr {
-				if err == nil {
-					t.Errorf("expected a transport/decode error, got nil")
-				} else if tc.wantErrMsg != "" && !strings.Contains(err.Error(), tc.wantErrMsg) {
-					t.Errorf("error %q does not contain %q", err.Error(), tc.wantErrMsg)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected transport error: %v", err)
-			}
-			if len(errs) != tc.wantErrCount {
-				t.Errorf(
-					"GraphQL error count: got %d, want %d (errs=%v)",
-					len(errs),
-					tc.wantErrCount,
-					errs,
-				)
-			}
+			runProtocolEdgeCase(
+				t,
+				name,
+				tc.handler(t),
+				tc.wantTransErr,
+				tc.wantErrCount,
+				tc.wantErrMsg,
+				simplePlan,
+			)
 		})
+	}
+}
+
+// runProtocolEdgeCase executes one protocol-edge-case subtest. Factored out
+// to keep TestExecute_ProtocolEdgeCases under the cognitive-complexity cap.
+func runProtocolEdgeCase(
+	t *testing.T,
+	name string,
+	handler http.HandlerFunc,
+	wantTransErr bool,
+	wantErrCount int,
+	wantErrMsg string,
+	simplePlan func(string) *Plan,
+) {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	ctx := context.Background()
+	if name == "context_precancelled" {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		cancel()
+	}
+	_, errs, err := execute(ctx, simplePlan(srv.URL), nil, nil, false)
+	assertProtocolResult(t, err, errs, wantTransErr, wantErrCount, wantErrMsg)
+}
+
+// assertProtocolResult checks the err / errs pair against the test expectations.
+func assertProtocolResult(
+	t *testing.T,
+	err error,
+	errs []GraphQLError,
+	wantTransErr bool,
+	wantErrCount int,
+	wantErrMsg string,
+) {
+	t.Helper()
+	if wantTransErr {
+		switch {
+		case err == nil:
+			t.Errorf("expected a transport/decode error, got nil")
+		case wantErrMsg != "" && !strings.Contains(err.Error(), wantErrMsg):
+			t.Errorf("error %q does not contain %q", err.Error(), wantErrMsg)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected transport error: %v", err)
+	}
+	if len(errs) != wantErrCount {
+		t.Errorf("GraphQL error count: got %d, want %d (errs=%v)", len(errs), wantErrCount, errs)
 	}
 }

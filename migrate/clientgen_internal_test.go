@@ -12,7 +12,7 @@ var testSubgraphs = []SubgraphEntry{
 	{EnumName: "USERS", ServiceName: "users"},
 }
 
-var testData = Data{
+var testData = &Data{
 	ServiceName:     "example",
 	ServiceDir:      "/srv/webapp/services/example",
 	PackageName:     "cross_service",

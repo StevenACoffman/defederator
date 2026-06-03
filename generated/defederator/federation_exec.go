@@ -1,4 +1,4 @@
-// Package execengine executes a pre-built federation Plan against subgraph HTTP endpoints.
+// Package defederator executes a pre-built federation Plan against subgraph HTTP endpoints.
 // It has no dependency on the query planner — all routing decisions (which subgraph owns
 // which field, key fields for entity resolution, etc.) are encoded in the Plan at build time.
 package defederator
@@ -47,8 +47,8 @@ type EntityFetch struct {
 // planner-added fields (key fields, __typename, @requires pre-fetch fields) from
 // the final merged response.
 type FieldProjection struct {
-	Key      string
-	Children []*FieldProjection
+	Key      string             `json:"Key"`
+	Children []*FieldProjection `json:"Children,omitempty"`
 }
 
 // rawSpec is the JSON-decodable form of an enum-keyed plan spec.
@@ -118,6 +118,21 @@ type graphqlRequest struct {
 	Variables     any    `json:"variables,omitempty"`
 }
 
+// fetchResult is the value passed back from each parallel fetch goroutine.
+type fetchResult struct {
+	data   rawMerged
+	errors []GraphQLError
+	err    error
+}
+
+// entityResponseWrapper decodes the {"data":{"_entities":[...]}} envelope.
+type entityResponseWrapper struct {
+	Data struct {
+		Entities []json.RawMessage `json:"_entities"`
+	} `json:"data"`
+	Errors []GraphQLError `json:"errors,omitempty"`
+}
+
 // rawMerged is the internal accumulator type: top-level field name → raw JSON bytes.
 // Values are kept as json.RawMessage until final serialization to avoid
 // interface{} boxing and intermediate allocations.
@@ -176,7 +191,8 @@ func Resolve(specJSON string, urls map[string]string) (*Plan, error) {
 			Variables: f.Variables,
 		})
 	}
-	for _, ef := range raw.EntityFetches {
+	for i := range raw.EntityFetches {
+		ef := &raw.EntityFetches[i]
 		url, ok := urls[ef.SubgraphEnum]
 		if !ok {
 			return nil, fmt.Errorf("execengine: subgraph enum %q not in URL map", ef.SubgraphEnum)
@@ -211,8 +227,8 @@ func ResolveURLSpec(specJSON string) (*Plan, error) {
 	for _, f := range raw.Fetches {
 		plan.Fetches = append(plan.Fetches, Fetch(f))
 	}
-	for _, ef := range raw.EntityFetches {
-		plan.EntityFetches = append(plan.EntityFetches, EntityFetch(ef))
+	for i := range raw.EntityFetches {
+		plan.EntityFetches = append(plan.EntityFetches, EntityFetch(raw.EntityFetches[i]))
 	}
 	return plan, nil
 }
@@ -293,135 +309,141 @@ func execute(
 	if client == nil {
 		client = http.DefaultClient
 	}
-
-	merged := make(rawMerged)
-	var allErrors []GraphQLError
-
-	if len(plan.Fetches) == 1 {
-		// Single initial fetch: inline call avoids goroutine and WaitGroup overhead.
-		f := plan.Fetches[0]
-		data, errs, err := doGraphQLIntoMerged(
-			ctx,
-			client,
-			f.URL,
-			f.Query,
-			"",
-			filterVars(variables, f.Variables),
-		)
-		if err != nil {
-			return nil, nil, fmt.Errorf("execengine: fetch %s: %w", f.URL, err)
-		}
-		allErrors = append(allErrors, errs...)
-		if data != nil {
-			merged = data
-		}
-	} else {
-		type fetchResult struct {
-			data   rawMerged
-			errors []GraphQLError
-			err    error
-		}
-		results := make([]fetchResult, len(plan.Fetches))
-		var wg sync.WaitGroup
-
-		for i, fetch := range plan.Fetches {
-			wg.Add(1)
-			go func(i int, fetch Fetch) {
-				defer wg.Done()
-				data, errs, err := doGraphQLIntoMerged(
-					ctx,
-					client,
-					fetch.URL,
-					fetch.Query,
-					"",
-					filterVars(variables, fetch.Variables),
-				)
-				if err != nil {
-					results[i] = fetchResult{
-						err: fmt.Errorf("execengine: fetch %s: %w", fetch.URL, err),
-					}
-					return
-				}
-				results[i] = fetchResult{data: data, errors: errs}
-			}(i, fetch)
-		}
-		wg.Wait()
-
-		for _, r := range results {
-			if r.err != nil {
-				return nil, nil, r.err
-			}
-			allErrors = append(allErrors, r.errors...)
-			for k, v := range r.data {
-				merged[k] = v
-			}
-		}
+	merged, initErrs, err := runInitialFetches(ctx, client, plan, variables)
+	if err != nil {
+		return nil, nil, err
 	}
-
-	for _, ef := range plan.EntityFetches {
-		reps, err := collectRepresentations(
-			merged,
-			ef.ParentPath,
-			ef.TypeName,
-			ef.KeyFields,
-			ef.RequiresFields,
-			ef.IsParentList,
-		)
-		if err != nil {
-			allErrors = append(allErrors, GraphQLError{
-				Message: fmt.Sprintf("execengine: entity fetch for %s: %s", ef.TypeName, err),
-			})
-			continue
-		}
-		if len(reps) == 0 {
-			continue
-		}
-
-		entityQuery := ef.entityQuery()
-		entityVars := buildEntityFetchVars(reps, variables, ef.Variables)
-
-		// Decode wrapper and _entities in one pass — no intermediate json.RawMessage.
-		entityRaw, err := httpPost(ctx, client, ef.URL, entityQuery, "", entityVars)
-		if err != nil {
-			allErrors = append(allErrors, GraphQLError{
-				Message: fmt.Sprintf(
-					"execengine: entity fetch %s/%s: %s",
-					ef.URL,
-					ef.TypeName,
-					err,
-				),
-			})
-			continue
-		}
-		var entityWrapper struct {
-			Data struct {
-				Entities []json.RawMessage `json:"_entities"`
-			} `json:"data"`
-			Errors []GraphQLError `json:"errors,omitempty"`
-		}
-		if err := json.Unmarshal(entityRaw, &entityWrapper); err != nil {
-			allErrors = append(allErrors, GraphQLError{
-				Message: fmt.Sprintf(
-					"execengine: decode entity response %s/%s: %s",
-					ef.URL,
-					ef.TypeName,
-					err,
-				),
-			})
-			continue
-		}
-		allErrors = append(allErrors, entityWrapper.Errors...)
-		mergeEntityResults(merged, ef.ParentPath, entityWrapper.Data.Entities, ef.IsParentList)
+	allErrors := initErrs
+	for i := range plan.EntityFetches {
+		ef := &plan.EntityFetches[i]
+		efErrs := runEntityFetch(ctx, client, ef, merged, variables)
+		allErrors = append(allErrors, efErrs...)
 	}
-
 	if len(plan.Projection) > 0 && !skipProjection {
-		var err error
 		merged, err = applyProjection(merged, plan.Projection)
 		if err != nil {
 			return nil, allErrors, fmt.Errorf("execengine: apply projection: %w", err)
 		}
 	}
 	return merged, allErrors, nil
+}
+
+// runInitialFetches runs plan.Fetches and merges their results into one map.
+// A single fetch runs inline; multiple fetches run in parallel goroutines.
+func runInitialFetches(
+	ctx context.Context,
+	client *http.Client,
+	plan *Plan,
+	variables any,
+) (rawMerged, []GraphQLError, error) {
+	if len(plan.Fetches) == 1 {
+		return runSingleFetch(ctx, client, &plan.Fetches[0], variables)
+	}
+	return runParallelFetches(ctx, client, plan.Fetches, variables)
+}
+
+// runSingleFetch is the inline path for plans with exactly one initial fetch;
+// it skips goroutine + WaitGroup overhead.
+func runSingleFetch(
+	ctx context.Context,
+	client *http.Client,
+	f *Fetch,
+	variables any,
+) (rawMerged, []GraphQLError, error) {
+	data, errs, err := doGraphQLIntoMerged(
+		ctx, client, f.URL, f.Query, "", filterVars(variables, f.Variables),
+	)
+	if err != nil {
+		return nil, nil, fmt.Errorf("execengine: fetch %s: %w", f.URL, err)
+	}
+	if data == nil {
+		data = make(rawMerged)
+	}
+	return data, errs, nil
+}
+
+// runParallelFetches runs all fetches concurrently and merges their results.
+// Returns the first transport error encountered, if any.
+func runParallelFetches(
+	ctx context.Context,
+	client *http.Client,
+	fetches []Fetch,
+	variables any,
+) (rawMerged, []GraphQLError, error) {
+	results := make([]fetchResult, len(fetches))
+	var wg sync.WaitGroup
+	for i, fetch := range fetches {
+		wg.Add(1)
+		go func(i int, fetch Fetch) {
+			defer wg.Done()
+			data, errs, err := doGraphQLIntoMerged(
+				ctx, client, fetch.URL, fetch.Query, "",
+				filterVars(variables, fetch.Variables),
+			)
+			if err != nil {
+				results[i] = fetchResult{
+					err: fmt.Errorf("execengine: fetch %s: %w", fetch.URL, err),
+				}
+				return
+			}
+			results[i] = fetchResult{data: data, errors: errs}
+		}(i, fetch)
+	}
+	wg.Wait()
+	merged := make(rawMerged)
+	var allErrors []GraphQLError
+	for _, r := range results {
+		if r.err != nil {
+			return nil, nil, r.err
+		}
+		allErrors = append(allErrors, r.errors...)
+		for k, v := range r.data {
+			merged[k] = v
+		}
+	}
+	return merged, allErrors, nil
+}
+
+// runEntityFetch runs a single entity fetch and merges the result into data.
+// Any error is accumulated and returned as a GraphQL-level error so the rest
+// of the plan can still execute.
+func runEntityFetch(
+	ctx context.Context,
+	client *http.Client,
+	ef *EntityFetch,
+	data rawMerged,
+	variables any,
+) []GraphQLError {
+	reps, err := collectRepresentations(
+		data, ef.ParentPath, ef.TypeName, ef.KeyFields, ef.RequiresFields, ef.IsParentList,
+	)
+	if err != nil {
+		return []GraphQLError{{
+			Message: fmt.Sprintf("execengine: entity fetch for %s: %s", ef.TypeName, err),
+		}}
+	}
+	if len(reps) == 0 {
+		return nil
+	}
+	entityRaw, err := httpPost(
+		ctx, client, ef.URL, ef.entityQuery(), "",
+		buildEntityFetchVars(reps, variables, ef.Variables),
+	)
+	if err != nil {
+		return []GraphQLError{{
+			Message: fmt.Sprintf("execengine: entity fetch %s/%s: %s", ef.URL, ef.TypeName, err),
+		}}
+	}
+	var wrapper entityResponseWrapper
+	if err := json.Unmarshal(entityRaw, &wrapper); err != nil {
+		return []GraphQLError{{
+			Message: fmt.Sprintf(
+				"execengine: decode entity response %s/%s: %s", ef.URL, ef.TypeName, err,
+			),
+		}}
+	}
+	mergeEntityResults(data, ef.ParentPath, wrapper.Data.Entities, ef.IsParentList)
+	return wrapper.Errors
 }
 
 // applyProjection trims data to only the fields in proj, discarding planner-added fields.
@@ -437,56 +459,84 @@ func applyProjection(data rawMerged, proj []*FieldProjection) (rawMerged, error)
 		if !ok {
 			continue
 		}
-		if len(p.Children) == 0 {
-			result[p.Key] = v
-			continue
+		out, err := projectValue(v, p)
+		if err != nil {
+			return nil, err
 		}
-		// Nested field: v is a raw JSON object or array; decode to apply child projection.
-		if len(v) > 0 && v[0] == '[' {
-			var arr []json.RawMessage
-			if err := json.Unmarshal(v, &arr); err != nil {
-				return nil, fmt.Errorf("decode array at %q: %w", p.Key, err)
-			}
-			out := make([]json.RawMessage, len(arr))
-			for i, elem := range arr {
-				if len(elem) > 0 && elem[0] == '{' {
-					var obj rawMerged
-					if err := json.Unmarshal(elem, &obj); err != nil {
-						return nil, fmt.Errorf("decode element %d at %q: %w", i, p.Key, err)
-					}
-					filtered, err := applyProjection(obj, p.Children)
-					if err != nil {
-						return nil, err
-					}
-					b, err := marshalRawMerged(filtered)
-					if err != nil {
-						return nil, err
-					}
-					out[i] = b
-				} else {
-					out[i] = elem
-				}
-			}
-			result[p.Key] = marshalRawList(out)
-		} else if len(v) > 0 && v[0] == '{' {
-			var obj rawMerged
-			if err := json.Unmarshal(v, &obj); err != nil {
-				return nil, fmt.Errorf("decode object at %q: %w", p.Key, err)
-			}
-			filtered, err := applyProjection(obj, p.Children)
-			if err != nil {
-				return nil, err
-			}
-			b, err := marshalRawMerged(filtered)
-			if err != nil {
-				return nil, err
-			}
-			result[p.Key] = b
-		} else {
-			result[p.Key] = v
-		}
+		result[p.Key] = out
 	}
 	return result, nil
+}
+
+// projectValue applies the projection p to a single JSON value v, returning
+// the projected raw bytes. Leaves are returned unchanged; objects and arrays
+// are recursively filtered.
+func projectValue(v json.RawMessage, p *FieldProjection) (json.RawMessage, error) {
+	if len(p.Children) == 0 {
+		return v, nil
+	}
+	if len(v) == 0 {
+		return v, nil
+	}
+	switch v[0] {
+	case '[':
+		return projectArray(v, p)
+	case '{':
+		return projectObject(v, p)
+	default:
+		return v, nil
+	}
+}
+
+// projectArray decodes a JSON array and projects each object element.
+func projectArray(v json.RawMessage, p *FieldProjection) (json.RawMessage, error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(v, &arr); err != nil {
+		return nil, fmt.Errorf("decode array at %q: %w", p.Key, err)
+	}
+	out := make([]json.RawMessage, len(arr))
+	for i, elem := range arr {
+		if len(elem) == 0 || elem[0] != '{' {
+			out[i] = elem
+			continue
+		}
+		filtered, err := projectObjectElement(elem, p, i)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = filtered
+	}
+	return marshalRawList(out), nil
+}
+
+// projectObjectElement decodes a single object inside an array and applies p's children.
+func projectObjectElement(
+	elem json.RawMessage,
+	p *FieldProjection,
+	index int,
+) (json.RawMessage, error) {
+	var obj rawMerged
+	if err := json.Unmarshal(elem, &obj); err != nil {
+		return nil, fmt.Errorf("decode element %d at %q: %w", index, p.Key, err)
+	}
+	filtered, err := applyProjection(obj, p.Children)
+	if err != nil {
+		return nil, err
+	}
+	return marshalRawMerged(filtered)
+}
+
+// projectObject decodes a JSON object and recursively projects its children.
+func projectObject(v json.RawMessage, p *FieldProjection) (json.RawMessage, error) {
+	var obj rawMerged
+	if err := json.Unmarshal(v, &obj); err != nil {
+		return nil, fmt.Errorf("decode object at %q: %w", p.Key, err)
+	}
+	filtered, err := applyProjection(obj, p.Children)
+	if err != nil {
+		return nil, err
+	}
+	return marshalRawMerged(filtered)
 }
 
 // httpPost marshals a GraphQL request, POSTs it to url, and returns the raw response body.
@@ -632,42 +682,66 @@ func collectLeavesRaw(raw json.RawMessage, path []string, isList bool) ([]json.R
 		return nil, nil
 	}
 	if len(path) == 0 {
-		if isList {
-			var list []json.RawMessage
-			if err := json.Unmarshal(raw, &list); err != nil {
-				return nil, err
-			}
-			return list, nil
-		}
-		return []json.RawMessage{raw}, nil
+		return terminalLeaves(raw, isList)
 	}
 	switch raw[0] {
 	case '{':
-		var obj rawMerged
-		if err := json.Unmarshal(raw, &obj); err != nil {
-			return nil, fmt.Errorf("decode at %q: %w", path[0], err)
-		}
-		v, ok := obj[path[0]]
-		if !ok {
-			return nil, nil
-		}
-		return collectLeavesRaw(v, path[1:], isList)
+		return collectFromObject(raw, path, isList)
 	case '[':
-		var arr []json.RawMessage
-		if err := json.Unmarshal(raw, &arr); err != nil {
-			return nil, err
-		}
-		var results []json.RawMessage
-		for _, elem := range arr {
-			sub, err := collectLeavesRaw(elem, path, isList) // same path: array is transparent
-			if err != nil {
-				return nil, err
-			}
-			results = append(results, sub...)
-		}
-		return results, nil
+		return collectFromArray(raw, path, isList)
 	}
 	return nil, nil
+}
+
+// terminalLeaves returns the leaf value(s) at the end of a traversal path.
+func terminalLeaves(raw json.RawMessage, isList bool) ([]json.RawMessage, error) {
+	if !isList {
+		return []json.RawMessage{raw}, nil
+	}
+	var list []json.RawMessage
+	if err := json.Unmarshal(raw, &list); err != nil {
+		return nil, fmt.Errorf("decode leaf list: %w", err)
+	}
+	return list, nil
+}
+
+// collectFromObject descends into a JSON object along path[0].
+func collectFromObject(
+	raw json.RawMessage,
+	path []string,
+	isList bool,
+) ([]json.RawMessage, error) {
+	var obj rawMerged
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return nil, fmt.Errorf("decode at %q: %w", path[0], err)
+	}
+	v, ok := obj[path[0]]
+	if !ok {
+		return nil, nil
+	}
+	return collectLeavesRaw(v, path[1:], isList)
+}
+
+// collectFromArray fans out over each element of a JSON array, applying the
+// same path to every element (arrays are transparent).
+func collectFromArray(
+	raw json.RawMessage,
+	path []string,
+	isList bool,
+) ([]json.RawMessage, error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err != nil {
+		return nil, fmt.Errorf("decode array at %q: %w", path[0], err)
+	}
+	var results []json.RawMessage
+	for _, elem := range arr {
+		sub, err := collectLeavesRaw(elem, path, isList)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, sub...)
+	}
+	return results, nil
 }
 
 // buildRepresentation constructs a single entity representation from an object's raw fields.
@@ -709,67 +783,127 @@ func mergeEntityResults(
 	if len(path) == 0 || len(entities) == 0 {
 		return entities
 	}
+	head := path[0]
+	rest := path[1:]
 
-	if len(path) == 1 {
-		target := data[path[0]]
-		if isList {
-			var list []json.RawMessage
-			if err := json.Unmarshal(target, &list); err != nil {
-				return entities
-			}
-			for i := range list {
-				if len(entities) == 0 {
-					break
-				}
-				if m := mergeRawObjects(list[i], entities[0]); m != nil {
-					list[i] = m
-				}
-				entities = entities[1:]
-			}
-			data[path[0]] = marshalRawList(list)
-		} else {
-			if m := mergeRawObjects(target, entities[0]); m != nil {
-				data[path[0]] = m
-			}
-			entities = entities[1:]
-		}
+	if len(rest) == 0 {
+		return mergeEntityLeaf(data, head, entities, isList)
+	}
+	return descendAndMerge(data, head, rest, entities, isList)
+}
+
+// mergeEntityLeaf merges entities into the value at data[head]; it is the
+// terminal step of the entity-merge recursion.
+func mergeEntityLeaf(
+	data rawMerged,
+	head string,
+	entities []json.RawMessage,
+	isList bool,
+) []json.RawMessage {
+	target := data[head]
+	if isList {
+		return mergeEntityList(data, head, target, entities)
+	}
+	if m := mergeRawObjects(target, entities[0]); m != nil {
+		data[head] = m
+	}
+	return entities[1:]
+}
+
+// mergeEntityList decodes target as a JSON array and merges one entity into
+// each element in order.
+func mergeEntityList(
+	data rawMerged,
+	head string,
+	target json.RawMessage,
+	entities []json.RawMessage,
+) []json.RawMessage {
+	var list []json.RawMessage
+	if err := json.Unmarshal(target, &list); err != nil {
 		return entities
 	}
+	for i := range list {
+		if len(entities) == 0 {
+			break
+		}
+		if m := mergeRawObjects(list[i], entities[0]); m != nil {
+			list[i] = m
+		}
+		entities = entities[1:]
+	}
+	data[head] = marshalRawList(list)
+	return entities
+}
 
-	// Navigate one level deeper, recursing into objects or each element of an array.
-	// Arrays are transparent: fan through each element and consume entities in order.
-	next := data[path[0]]
+// descendAndMerge navigates one level deeper into data[head] (an object or
+// an array of objects) and recurses with the remaining path.
+func descendAndMerge(
+	data rawMerged,
+	head string,
+	rest []string,
+	entities []json.RawMessage,
+	isList bool,
+) []json.RawMessage {
+	next := data[head]
 	if len(next) == 0 {
 		return entities
 	}
-	if next[0] == '[' {
-		var arr []json.RawMessage
-		if err := json.Unmarshal(next, &arr); err != nil {
-			return entities
+	switch next[0] {
+	case '[':
+		return descendArrayAndMerge(data, head, rest, next, entities, isList)
+	case '{':
+		return descendObjectAndMerge(data, head, rest, next, entities, isList)
+	}
+	return entities
+}
+
+// descendArrayAndMerge fans through each element of an array, recursing for
+// each one. Entities are consumed in element order.
+func descendArrayAndMerge(
+	data rawMerged,
+	head string,
+	rest []string,
+	next json.RawMessage,
+	entities []json.RawMessage,
+	isList bool,
+) []json.RawMessage {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(next, &arr); err != nil {
+		return entities
+	}
+	for i, elem := range arr {
+		if len(elem) == 0 || elem[0] != '{' {
+			continue
 		}
-		for i, elem := range arr {
-			if len(elem) == 0 || elem[0] != '{' {
-				continue
-			}
-			var sub rawMerged
-			if err := json.Unmarshal(elem, &sub); err != nil {
-				continue
-			}
-			entities = mergeEntityResults(sub, path[1:], entities, isList)
-			if b, err := marshalRawMerged(sub); err == nil {
-				arr[i] = b
-			}
-		}
-		data[path[0]] = marshalRawList(arr)
-	} else if next[0] == '{' {
 		var sub rawMerged
-		if err := json.Unmarshal(next, &sub); err != nil {
-			return entities
+		if err := json.Unmarshal(elem, &sub); err != nil {
+			continue
 		}
-		entities = mergeEntityResults(sub, path[1:], entities, isList)
+		entities = mergeEntityResults(sub, rest, entities, isList)
 		if b, err := marshalRawMerged(sub); err == nil {
-			data[path[0]] = b
+			arr[i] = b
 		}
+	}
+	data[head] = marshalRawList(arr)
+	return entities
+}
+
+// descendObjectAndMerge recurses into a single nested object at data[head].
+func descendObjectAndMerge(
+	data rawMerged,
+	head string,
+	rest []string,
+	next json.RawMessage,
+	entities []json.RawMessage,
+	isList bool,
+) []json.RawMessage {
+	var sub rawMerged
+	if err := json.Unmarshal(next, &sub); err != nil {
+		return entities
+	}
+	entities = mergeEntityResults(sub, rest, entities, isList)
+	if b, err := marshalRawMerged(sub); err == nil {
+		data[head] = b
 	}
 	return entities
 }
@@ -907,7 +1041,7 @@ func unmarshalMergedIntoStruct(merged rawMerged, v reflect.Value) error {
 		if !f.IsExported() {
 			continue
 		}
-		name := jsonTagName(f)
+		name := jsonTagName(&f)
 		if name == "-" {
 			continue
 		}
@@ -924,7 +1058,7 @@ func unmarshalMergedIntoStruct(merged rawMerged, v reflect.Value) error {
 
 // jsonTagName returns the JSON field name for a struct field: the first segment of
 // the json tag if present, otherwise the field name. Returns "-" for skipped fields.
-func jsonTagName(f reflect.StructField) string {
+func jsonTagName(f *reflect.StructField) string {
 	tag := f.Tag.Get("json")
 	if idx := strings.IndexByte(tag, ','); idx >= 0 {
 		tag = tag[:idx]
@@ -942,7 +1076,10 @@ func marshalFallback(merged rawMerged, dest any) error {
 	if err != nil {
 		return fmt.Errorf("marshal merged: %w", err)
 	}
-	return json.Unmarshal(b, dest)
+	if err := json.Unmarshal(b, dest); err != nil {
+		return fmt.Errorf("unmarshal merged into dest: %w", err)
+	}
+	return nil
 }
 
 // filterVars returns only the variables whose names are in keep.

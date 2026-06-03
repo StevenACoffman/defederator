@@ -68,8 +68,9 @@ func setupFixtureDir(t *testing.T) string {
 	); err != nil {
 		t.Fatalf("write SDL: %v", err)
 	}
-	// genqlient.yaml (schema path is relative to service dir).
-	gqYAML := strings.ReplaceAll(fixtureGenqlientYAML, "../../schema/", "../../schema/")
+	// genqlient.yaml (schema path is relative to service dir; fixture already
+	// uses the same prefix, so no rewriting is needed).
+	gqYAML := fixtureGenqlientYAML
 	if err := os.WriteFile(
 		filepath.Join(serviceDir, "genqlient.yaml"),
 		[]byte(gqYAML),

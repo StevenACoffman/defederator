@@ -11,6 +11,24 @@ import (
 	"testing"
 )
 
+type unmarshalProductCase struct {
+	ID  string `json:"id"`
+	SKU string `json:"sku"`
+}
+
+type unmarshalIgnoredCase struct {
+	Ignored string `json:"-"`
+}
+
+// unmarshalRawMergedIntoCase bundles inputs and the per-case validator for
+// TestUnmarshalRawMergedInto.
+type unmarshalRawMergedIntoCase struct {
+	merged   rawMerged
+	dest     any
+	wantErr  bool
+	validate func(t *testing.T, dest any)
+}
+
 // TestDoGraphQLInto verifies that the fast-path decoder populates dest directly from
 // the HTTP response without a separate json.RawMessage intermediate.
 // TestDoGraphQLIntoMerged verifies the single-pass initial-fetch decoder populates
@@ -43,56 +61,67 @@ func TestDoGraphQLIntoMerged(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			body := tc.body
-			srv := httptest.NewServer(
-				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(body))
-				}),
+			runDoGraphQLIntoMergedCase(
+				t,
+				tc.body,
+				tc.wantKeys,
+				tc.wantErrs,
+				tc.wantNil,
+				tc.wantError,
 			)
-			defer srv.Close()
-
-			data, errs, err := doGraphQLIntoMerged(
-				context.Background(),
-				http.DefaultClient,
-				srv.URL,
-				`{ q }`,
-				"",
-				nil,
-			)
-			if tc.wantError {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(errs) != tc.wantErrs {
-				t.Errorf("errs count: got %d, want %d", len(errs), tc.wantErrs)
-			}
-			if tc.wantNil {
-				if data != nil {
-					t.Errorf("expected nil data, got %v", data)
-				}
-				return
-			}
-			for _, k := range tc.wantKeys {
-				if _, ok := data[k]; !ok {
-					t.Errorf("key %q missing from merged data", k)
-				}
-			}
 		})
 	}
 }
 
-func TestDoGraphQLInto(t *testing.T) {
-	type product struct {
-		ID  string `json:"id"`
-		SKU string `json:"sku"`
+// runDoGraphQLIntoMergedCase runs one TestDoGraphQLIntoMerged subtest.
+func runDoGraphQLIntoMergedCase(
+	t *testing.T,
+	body string,
+	wantKeys []string,
+	wantErrs int,
+	wantNil, wantError bool,
+) {
+	t.Helper()
+	srv := newStaticServer(body)
+	defer srv.Close()
+	data, errs, err := doGraphQLIntoMerged(
+		context.Background(), http.DefaultClient, srv.URL, `{ q }`, "", nil,
+	)
+	if wantError {
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		return
 	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(errs) != wantErrs {
+		t.Errorf("errs count: got %d, want %d", len(errs), wantErrs)
+	}
+	if wantNil {
+		if data != nil {
+			t.Errorf("expected nil data, got %v", data)
+		}
+		return
+	}
+	for _, k := range wantKeys {
+		if _, ok := data[k]; !ok {
+			t.Errorf("key %q missing from merged data", k)
+		}
+	}
+}
 
+// newStaticServer returns an httptest server that responds with body as
+// application/json on every request.
+func newStaticServer(body string) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+func TestDoGraphQLInto(t *testing.T) {
 	cases := map[string]struct {
 		body      string
 		wantID    string
@@ -121,75 +150,72 @@ func TestDoGraphQLInto(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			body := tc.body
-			srv := httptest.NewServer(
-				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-					w.Header().Set("Content-Type", "application/json")
-					_, _ = w.Write([]byte(body))
-				}),
-			)
-			defer srv.Close()
-
-			var dest product
-			errs, err := doGraphQLInto(
-				context.Background(),
-				http.DefaultClient,
-				srv.URL,
-				`{ p { id sku } }`,
-				"",
-				nil,
-				&dest,
-			)
-			if tc.wantError {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(errs) != tc.wantErrs {
-				t.Errorf("errs count: got %d, want %d", len(errs), tc.wantErrs)
-			}
-			if dest.ID != tc.wantID {
-				t.Errorf("ID: got %q, want %q", dest.ID, tc.wantID)
-			}
-			if dest.SKU != tc.wantSKU {
-				t.Errorf("SKU: got %q, want %q", dest.SKU, tc.wantSKU)
-			}
+			runDoGraphQLIntoCase(t, tc.body, tc.wantID, tc.wantSKU, tc.wantErrs, tc.wantError)
 		})
 	}
 
-	// Untyped dest: when dest is *any, json decodes data into the interface.
-	t.Run("untyped_any_populated", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"data":{"id":"p1"}}`))
-		}))
-		defer srv.Close()
+	t.Run("untyped_any_populated", testDoGraphQLIntoUntypedAny)
+}
 
-		var dest any
-		_, err := doGraphQLInto(
-			context.Background(),
-			http.DefaultClient,
-			srv.URL,
-			`{ p { id } }`,
-			"",
-			nil,
-			&dest,
-		)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+// runDoGraphQLIntoCase runs one typed-struct subtest of TestDoGraphQLInto.
+func runDoGraphQLIntoCase(
+	t *testing.T,
+	body, wantID, wantSKU string,
+	wantErrs int,
+	wantError bool,
+) {
+	t.Helper()
+	type product struct {
+		ID  string `json:"id"`
+		SKU string `json:"sku"`
+	}
+	srv := newStaticServer(body)
+	defer srv.Close()
+	var dest product
+	errs, err := doGraphQLInto(
+		context.Background(), http.DefaultClient, srv.URL,
+		`{ p { id sku } }`, "", nil, &dest,
+	)
+	if wantError {
+		if err == nil {
+			t.Fatal("expected error, got nil")
 		}
-		m, ok := dest.(map[string]any)
-		if !ok {
-			t.Fatalf("expected map[string]any, got %T", dest)
-		}
-		if m["id"] != "p1" {
-			t.Errorf("id: got %v, want p1", m["id"])
-		}
-	})
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(errs) != wantErrs {
+		t.Errorf("errs count: got %d, want %d", len(errs), wantErrs)
+	}
+	if dest.ID != wantID {
+		t.Errorf("ID: got %q, want %q", dest.ID, wantID)
+	}
+	if dest.SKU != wantSKU {
+		t.Errorf("SKU: got %q, want %q", dest.SKU, wantSKU)
+	}
+}
+
+// testDoGraphQLIntoUntypedAny is the *any destination case: when dest is
+// *any, the JSON decoder writes into the interface as a map[string]any.
+func testDoGraphQLIntoUntypedAny(t *testing.T) {
+	srv := newStaticServer(`{"data":{"id":"p1"}}`)
+	defer srv.Close()
+	var dest any
+	_, err := doGraphQLInto(
+		context.Background(), http.DefaultClient, srv.URL,
+		`{ p { id } }`, "", nil, &dest,
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	m, ok := dest.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", dest)
+	}
+	if m["id"] != "p1" {
+		t.Errorf("id: got %v, want p1", m["id"])
+	}
 }
 
 func jsonResp(t *testing.T, data any) http.HandlerFunc {
@@ -497,32 +523,42 @@ func TestMergeRawObjects(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got := mergeRawObjects(json.RawMessage(tc.dst), json.RawMessage(tc.src))
-			if tc.wantNil {
-				if got != nil {
-					t.Errorf("expected nil, got %s", got)
-				}
-				return
-			}
-			if got == nil {
-				t.Fatal("expected non-nil result")
-			}
-			// Round-trip through map to verify the result is valid JSON with correct keys.
-			var m map[string]any
-			if err := json.Unmarshal(got, &m); err != nil {
-				t.Fatalf("result is not valid JSON: %v (raw: %s)", err, got)
-			}
-			for _, k := range tc.wantKeys {
-				if _, ok := m[k]; !ok {
-					t.Errorf("key %q missing from result %v", k, m)
-				}
-			}
-			for _, k := range tc.wantAbsent {
-				if _, ok := m[k]; ok {
-					t.Errorf("key %q should be absent from result %v", k, m)
-				}
-			}
+			runMergeRawObjectsCase(t, tc.dst, tc.src, tc.wantNil, tc.wantKeys, tc.wantAbsent)
 		})
+	}
+}
+
+// runMergeRawObjectsCase runs one TestMergeRawObjects subtest.
+func runMergeRawObjectsCase(
+	t *testing.T,
+	dst, src string,
+	wantNil bool,
+	wantKeys, wantAbsent []string,
+) {
+	t.Helper()
+	got := mergeRawObjects(json.RawMessage(dst), json.RawMessage(src))
+	if wantNil {
+		if got != nil {
+			t.Errorf("expected nil, got %s", got)
+		}
+		return
+	}
+	if got == nil {
+		t.Fatal("expected non-nil result")
+	}
+	var m map[string]any
+	if err := json.Unmarshal(got, &m); err != nil {
+		t.Fatalf("result is not valid JSON: %v (raw: %s)", err, got)
+	}
+	for _, k := range wantKeys {
+		if _, ok := m[k]; !ok {
+			t.Errorf("key %q missing from result %v", k, m)
+		}
+	}
+	for _, k := range wantAbsent {
+		if _, ok := m[k]; ok {
+			t.Errorf("key %q should be absent from result %v", k, m)
+		}
 	}
 }
 
@@ -573,51 +609,71 @@ func TestResolveURLSpec_RoundTrip(t *testing.T) {
 			if len(plan.Fetches) == 0 {
 				t.Fatal("expected at least one fetch")
 			}
-			if plan.Fetches[0].URL != tc.wantFetchURL {
-				t.Errorf("fetch URL: got %q, want %q", plan.Fetches[0].URL, tc.wantFetchURL)
-			}
-			if tc.wantQuery != "" && plan.Fetches[0].Query != tc.wantQuery {
-				t.Errorf("fetch query: got %q, want %q", plan.Fetches[0].Query, tc.wantQuery)
-			}
-			if tc.wantVars != nil {
-				if len(plan.Fetches[0].Variables) != len(tc.wantVars) ||
-					plan.Fetches[0].Variables[0] != tc.wantVars[0] {
-					t.Errorf(
-						"fetch variables: got %v, want %v",
-						plan.Fetches[0].Variables,
-						tc.wantVars,
-					)
-				}
-			}
-			if tc.wantEntityURL != "" {
-				if len(plan.EntityFetches) == 0 {
-					t.Fatal("expected entity fetch")
-				}
-				ef := plan.EntityFetches[0]
-				if ef.URL != tc.wantEntityURL {
-					t.Errorf("entity URL: got %q, want %q", ef.URL, tc.wantEntityURL)
-				}
-				if ef.TypeName != tc.wantTypeName {
-					t.Errorf("entity typeName: got %q, want %q", ef.TypeName, tc.wantTypeName)
-				}
-				if len(ef.KeyFields) != len(tc.wantKeyFields) ||
-					ef.KeyFields[0] != tc.wantKeyFields[0] {
-					t.Errorf("entity keyFields: got %v, want %v", ef.KeyFields, tc.wantKeyFields)
-				}
-			}
-			if tc.wantProjKey != "" {
-				if len(plan.Projection) == 0 || plan.Projection[0].Key != tc.wantProjKey {
-					t.Errorf("projection key: got %v, want %q", plan.Projection, tc.wantProjKey)
-				}
-				if len(plan.Projection[0].Children) != tc.wantProjChildren {
-					t.Errorf(
-						"projection children: got %d, want %d",
-						len(plan.Projection[0].Children),
-						tc.wantProjChildren,
-					)
-				}
-			}
+			assertResolvedFetch(t, plan, tc.wantFetchURL, tc.wantQuery, tc.wantVars)
+			assertResolvedEntityFetch(t, plan, tc.wantEntityURL, tc.wantTypeName, tc.wantKeyFields)
+			assertResolvedProjection(t, plan, tc.wantProjKey, tc.wantProjChildren)
 		})
+	}
+}
+
+// assertResolvedFetch checks the initial fetch fields parsed from a URL spec.
+func assertResolvedFetch(t *testing.T, plan *Plan, wantURL, wantQuery string, wantVars []string) {
+	t.Helper()
+	if plan.Fetches[0].URL != wantURL {
+		t.Errorf("fetch URL: got %q, want %q", plan.Fetches[0].URL, wantURL)
+	}
+	if wantQuery != "" && plan.Fetches[0].Query != wantQuery {
+		t.Errorf("fetch query: got %q, want %q", plan.Fetches[0].Query, wantQuery)
+	}
+	if wantVars == nil {
+		return
+	}
+	if len(plan.Fetches[0].Variables) != len(wantVars) ||
+		plan.Fetches[0].Variables[0] != wantVars[0] {
+		t.Errorf("fetch variables: got %v, want %v", plan.Fetches[0].Variables, wantVars)
+	}
+}
+
+// assertResolvedEntityFetch validates the first entity fetch (if expected).
+func assertResolvedEntityFetch(
+	t *testing.T,
+	plan *Plan,
+	wantURL, wantTypeName string,
+	wantKeyFields []string,
+) {
+	t.Helper()
+	if wantURL == "" {
+		return
+	}
+	if len(plan.EntityFetches) == 0 {
+		t.Fatal("expected entity fetch")
+	}
+	ef := plan.EntityFetches[0]
+	if ef.URL != wantURL {
+		t.Errorf("entity URL: got %q, want %q", ef.URL, wantURL)
+	}
+	if ef.TypeName != wantTypeName {
+		t.Errorf("entity typeName: got %q, want %q", ef.TypeName, wantTypeName)
+	}
+	if len(ef.KeyFields) != len(wantKeyFields) || ef.KeyFields[0] != wantKeyFields[0] {
+		t.Errorf("entity keyFields: got %v, want %v", ef.KeyFields, wantKeyFields)
+	}
+}
+
+// assertResolvedProjection validates the projection key / children count.
+func assertResolvedProjection(t *testing.T, plan *Plan, wantKey string, wantChildren int) {
+	t.Helper()
+	if wantKey == "" {
+		return
+	}
+	if len(plan.Projection) == 0 || plan.Projection[0].Key != wantKey {
+		t.Errorf("projection key: got %v, want %q", plan.Projection, wantKey)
+	}
+	if len(plan.Projection[0].Children) != wantChildren {
+		t.Errorf(
+			"projection children: got %d, want %d",
+			len(plan.Projection[0].Children), wantChildren,
+		)
 	}
 }
 
@@ -918,233 +974,234 @@ func TestProjection_Gating(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			plan := &Plan{
-				Fetches:    []Fetch{{URL: srv.URL, Query: `{ product { id sku __typename } }`}},
-				Projection: projection,
-			}
-			raw, _, err := execute(context.Background(), plan, nil, nil, tc.skipProj)
-			if err != nil {
-				t.Fatalf("execute: %v", err)
-			}
-			var p map[string]any
-			if err := json.Unmarshal(raw["product"], &p); err != nil {
-				t.Fatalf("unmarshal product: %v", err)
-			}
-			if p["id"] != "p1" {
-				t.Errorf("id: got %v, want p1", p["id"])
-			}
-			_, hasTypename := p["__typename"]
-			if tc.wantTypenamePresent && !hasTypename {
-				t.Error("__typename should be present (projection was skipped)")
-			}
-			if !tc.wantTypenamePresent && hasTypename {
-				t.Error("__typename should be absent (projection was applied)")
-			}
+			runProjectionGatingCase(t, srv.URL, projection, tc.skipProj, tc.wantTypenamePresent)
 		})
 	}
 
-	// End-to-end: ExecuteAndUnmarshal sets skipProj=true for typed struct destinations.
-	// The struct's json.Unmarshal drops __typename, so only declared fields are populated.
-	// Use the slow path by adding a no-op entity fetch so execute() is called.
 	t.Run("ExecuteAndUnmarshal_typed_uses_skip", func(t *testing.T) {
-		// Entity server: returns empty _entities (entity fetch is a no-op here; we just
-		// need the slow path to be taken so execute() is called with skipProj=true).
-		entitySrv := httptest.NewServer(
-			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
-				b, _ := json.Marshal(resp)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write(b)
-			}),
-		)
-		defer entitySrv.Close()
-
-		type product struct {
-			ID  string `json:"id"`
-			SKU string `json:"sku"`
-		}
-		type result struct {
-			Product product `json:"product"`
-		}
-		plan := &Plan{
-			Fetches: []Fetch{{URL: srv.URL, Query: `{ product { id sku __typename } }`}},
-			EntityFetches: []EntityFetch{{
-				URL: entitySrv.URL, TypeName: "Product",
-				KeyFields: []string{"id"}, Selection: "sku\n",
-				ParentPath: []string{"product"},
-			}},
-			Projection: []*FieldProjection{
-				{Key: "product", Children: []*FieldProjection{{Key: "id"}, {Key: "sku"}}},
-			},
-		}
-		var got result
-		if err := ExecuteAndUnmarshal(context.Background(), plan, nil, nil, &got); err != nil {
-			t.Fatalf("ExecuteAndUnmarshal: %v", err)
-		}
-		// Typed struct: __typename in raw JSON is silently dropped; id and sku populate.
-		if got.Product.ID != "p1" || got.Product.SKU != "s1" {
-			t.Errorf("got %+v", got.Product)
-		}
+		runTypedDestStripsTypename(t, srv.URL)
 	})
-
-	// End-to-end: ExecuteAndUnmarshal sets skipProj=false for *map[string]any destinations,
-	// so projection runs and planner-added fields are stripped from the output map.
 	t.Run("ExecuteAndUnmarshal_untyped_applies_projection", func(t *testing.T) {
-		entitySrv := httptest.NewServer(
-			http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				resp := map[string]any{"data": map[string]any{"_entities": []any{}}}
-				b, _ := json.Marshal(resp)
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write(b)
-			}),
-		)
-		defer entitySrv.Close()
-
-		plan := &Plan{
-			Fetches: []Fetch{{URL: srv.URL, Query: `{ product { id sku __typename } }`}},
-			EntityFetches: []EntityFetch{{
-				URL: entitySrv.URL, TypeName: "Product",
-				KeyFields: []string{"id"}, Selection: "sku\n",
-				ParentPath: []string{"product"},
-			}},
-			Projection: []*FieldProjection{
-				{Key: "product", Children: []*FieldProjection{{Key: "id"}, {Key: "sku"}}},
-			},
-		}
-		var dest map[string]any
-		if err := ExecuteAndUnmarshal(context.Background(), plan, nil, nil, &dest); err != nil {
-			t.Fatalf("ExecuteAndUnmarshal: %v", err)
-		}
-		p, _ := dest["product"].(map[string]any)
-		if p["id"] != "p1" {
-			t.Errorf("id: got %v, want p1", p["id"])
-		}
-		if _, has := p["__typename"]; has {
-			t.Error("__typename should have been stripped by projection for untyped dest")
-		}
+		runUntypedDestStripsTypename(t, srv.URL)
 	})
 }
 
-func TestUnmarshalRawMergedInto(t *testing.T) {
-	type Product struct {
+// runProjectionGatingCase verifies execute() honors skipProjection for the
+// raw rawMerged result returned to the caller.
+func runProjectionGatingCase(
+	t *testing.T,
+	url string,
+	projection []*FieldProjection,
+	skipProj, wantTypenamePresent bool,
+) {
+	t.Helper()
+	plan := &Plan{
+		Fetches:    []Fetch{{URL: url, Query: `{ product { id sku __typename } }`}},
+		Projection: projection,
+	}
+	raw, _, err := execute(context.Background(), plan, nil, nil, skipProj)
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	var p map[string]any
+	if err := json.Unmarshal(raw["product"], &p); err != nil {
+		t.Fatalf("unmarshal product: %v", err)
+	}
+	if p["id"] != "p1" {
+		t.Errorf("id: got %v, want p1", p["id"])
+	}
+	_, hasTypename := p["__typename"]
+	if wantTypenamePresent && !hasTypename {
+		t.Error("__typename should be present (projection was skipped)")
+	}
+	if !wantTypenamePresent && hasTypename {
+		t.Error("__typename should be absent (projection was applied)")
+	}
+}
+
+// runTypedDestStripsTypename exercises the typed-struct fast path: skipProj is
+// true, but json.Unmarshal into the typed struct silently drops __typename.
+func runTypedDestStripsTypename(t *testing.T, url string) {
+	t.Helper()
+	entitySrv := newStaticServer(`{"data":{"_entities":[]}}`)
+	defer entitySrv.Close()
+	type product struct {
 		ID  string `json:"id"`
 		SKU string `json:"sku"`
 	}
+	type result struct {
+		Product product `json:"product"`
+	}
+	plan := projectionGatingPlan(url, entitySrv.URL)
+	var got result
+	if err := ExecuteAndUnmarshal(context.Background(), plan, nil, nil, &got); err != nil {
+		t.Fatalf("ExecuteAndUnmarshal: %v", err)
+	}
+	if got.Product.ID != "p1" || got.Product.SKU != "s1" {
+		t.Errorf("got %+v", got.Product)
+	}
+}
 
+// runUntypedDestStripsTypename exercises the *map[string]any path: skipProj
+// is false, so projection runs and __typename is stripped from the output.
+func runUntypedDestStripsTypename(t *testing.T, url string) {
+	t.Helper()
+	entitySrv := newStaticServer(`{"data":{"_entities":[]}}`)
+	defer entitySrv.Close()
+	plan := projectionGatingPlan(url, entitySrv.URL)
+	var dest map[string]any
+	if err := ExecuteAndUnmarshal(context.Background(), plan, nil, nil, &dest); err != nil {
+		t.Fatalf("ExecuteAndUnmarshal: %v", err)
+	}
+	p, _ := dest["product"].(map[string]any)
+	if p["id"] != "p1" {
+		t.Errorf("id: got %v, want p1", p["id"])
+	}
+	if _, has := p["__typename"]; has {
+		t.Error("__typename should have been stripped by projection for untyped dest")
+	}
+}
+
+// projectionGatingPlan builds the shared plan used by the two end-to-end
+// subtests of TestProjection_Gating.
+func projectionGatingPlan(initURL, entityURL string) *Plan {
+	return &Plan{
+		Fetches: []Fetch{{URL: initURL, Query: `{ product { id sku __typename } }`}},
+		EntityFetches: []EntityFetch{{
+			URL: entityURL, TypeName: "Product",
+			KeyFields: []string{"id"}, Selection: "sku\n",
+			ParentPath: []string{"product"},
+		}},
+		Projection: []*FieldProjection{
+			{Key: "product", Children: []*FieldProjection{{Key: "id"}, {Key: "sku"}}},
+		},
+	}
+}
+
+func TestUnmarshalRawMergedInto(t *testing.T) {
+	cases := unmarshalRawMergedIntoCases()
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			runUnmarshalRawMergedIntoCase(t, tc)
+		})
+	}
+}
+
+// runUnmarshalRawMergedIntoCase executes one TestUnmarshalRawMergedInto subtest.
+func runUnmarshalRawMergedIntoCase(t *testing.T, tc unmarshalRawMergedIntoCase) {
+	t.Helper()
+	err := unmarshalRawMergedInto(tc.merged, tc.dest)
+	if tc.wantErr {
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if tc.validate != nil {
+		tc.validate(t, tc.dest)
+	}
+}
+
+// unmarshalRawMergedIntoCases returns the test table. Built in a helper so the
+// parent test's cognitive complexity stays under the lint cap.
+func unmarshalRawMergedIntoCases() map[string]unmarshalRawMergedIntoCase {
 	mustRaw := func(v any) json.RawMessage {
 		b, _ := json.Marshal(v)
 		return b
 	}
-
-	cases := map[string]struct {
-		merged   rawMerged
-		dest     any
-		wantErr  bool
-		validate func(t *testing.T, dest any)
-	}{
+	return map[string]unmarshalRawMergedIntoCase{
 		"struct_fields_populated": {
-			merged: rawMerged{"id": mustRaw("p1"), "sku": mustRaw("s1")},
-			dest:   &Product{},
-			validate: func(t *testing.T, dest any) {
-				t.Helper()
-				p := dest.(*Product)
-				if p.ID != "p1" {
-					t.Errorf("ID: got %q, want p1", p.ID)
-				}
-				if p.SKU != "s1" {
-					t.Errorf("SKU: got %q, want s1", p.SKU)
-				}
-			},
+			merged:   rawMerged{"id": mustRaw("p1"), "sku": mustRaw("s1")},
+			dest:     &unmarshalProductCase{},
+			validate: validateProductFields,
 		},
 		"unknown_key_ignored": {
-			merged: rawMerged{"id": mustRaw("p1"), "unknown": mustRaw("x")},
-			dest:   &Product{},
-			validate: func(t *testing.T, dest any) {
-				t.Helper()
-				p := dest.(*Product)
-				if p.ID != "p1" {
-					t.Errorf("ID: got %q, want p1", p.ID)
-				}
-			},
+			merged:   rawMerged{"id": mustRaw("p1"), "unknown": mustRaw("x")},
+			dest:     &unmarshalProductCase{},
+			validate: validateProductID,
 		},
 		"missing_key_leaves_zero": {
-			merged: rawMerged{"id": mustRaw("p1")},
-			dest:   &Product{SKU: "preset"},
-			validate: func(t *testing.T, dest any) {
-				t.Helper()
-				p := dest.(*Product)
-				if p.SKU != "preset" {
-					t.Errorf("SKU should remain preset, got %q", p.SKU)
-				}
-			},
+			merged:   rawMerged{"id": mustRaw("p1")},
+			dest:     &unmarshalProductCase{SKU: "preset"},
+			validate: validateProductSKUPreset,
 		},
 		"json_minus_tag_skipped": {
-			merged: rawMerged{"-": mustRaw("should-not-set")},
-			dest: &struct {
-				Ignored string `json:"-"`
-			}{},
-			validate: func(t *testing.T, dest any) {
-				t.Helper()
-				d := dest.(*struct {
-					Ignored string `json:"-"`
-				})
-				if d.Ignored != "" {
-					t.Errorf("field tagged json:\"-\" should not be set, got %q", d.Ignored)
-				}
-			},
+			merged:   rawMerged{"-": mustRaw("should-not-set")},
+			dest:     &unmarshalIgnoredCase{},
+			validate: validateIgnoredZero,
 		},
 		"any_dest_produces_map": {
-			merged: rawMerged{"id": mustRaw("p1"), "sku": mustRaw("s1")},
-			dest:   new(any),
-			validate: func(t *testing.T, dest any) {
-				t.Helper()
-				m, ok := (*dest.(*any)).(map[string]any)
-				if !ok {
-					t.Fatalf("expected map[string]any, got %T", *dest.(*any))
-				}
-				if m["id"] != "p1" {
-					t.Errorf("id: got %v, want p1", m["id"])
-				}
-			},
+			merged:   rawMerged{"id": mustRaw("p1"), "sku": mustRaw("s1")},
+			dest:     new(any),
+			validate: validateAnyMap,
 		},
 		"map_dest_populated": {
-			merged: rawMerged{"id": mustRaw("p1")},
-			dest:   &map[string]any{},
-			validate: func(t *testing.T, dest any) {
-				t.Helper()
-				m := *dest.(*map[string]any)
-				if m["id"] != "p1" {
-					t.Errorf("id: got %v, want p1", m["id"])
-				}
-			},
+			merged:   rawMerged{"id": mustRaw("p1")},
+			dest:     &map[string]any{},
+			validate: validateMapPopulated,
 		},
 		"fallback_for_unknown_type": {
-			merged: rawMerged{"0": mustRaw("a"), "1": mustRaw("b")},
-			dest:   &[]string{},
-			validate: func(_ *testing.T, _ any) {
-				// fallback marshals merged (a JSON object) then unmarshals into []string,
-				// which will fail — so we just verify wantErr=true handles it.
-			},
+			merged:  rawMerged{"0": mustRaw("a"), "1": mustRaw("b")},
+			dest:    &[]string{},
 			wantErr: true,
 		},
 	}
+}
 
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			err := unmarshalRawMergedInto(tc.merged, tc.dest)
-			if tc.wantErr {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.validate != nil {
-				tc.validate(t, tc.dest)
-			}
-		})
+func validateProductFields(t *testing.T, dest any) {
+	t.Helper()
+	p := dest.(*unmarshalProductCase)
+	if p.ID != "p1" {
+		t.Errorf("ID: got %q, want p1", p.ID)
+	}
+	if p.SKU != "s1" {
+		t.Errorf("SKU: got %q, want s1", p.SKU)
+	}
+}
+
+func validateProductID(t *testing.T, dest any) {
+	t.Helper()
+	p := dest.(*unmarshalProductCase)
+	if p.ID != "p1" {
+		t.Errorf("ID: got %q, want p1", p.ID)
+	}
+}
+
+func validateProductSKUPreset(t *testing.T, dest any) {
+	t.Helper()
+	p := dest.(*unmarshalProductCase)
+	if p.SKU != "preset" {
+		t.Errorf("SKU should remain preset, got %q", p.SKU)
+	}
+}
+
+func validateIgnoredZero(t *testing.T, dest any) {
+	t.Helper()
+	d := dest.(*unmarshalIgnoredCase)
+	if d.Ignored != "" {
+		t.Errorf("field tagged json:\"-\" should not be set, got %q", d.Ignored)
+	}
+}
+
+func validateAnyMap(t *testing.T, dest any) {
+	t.Helper()
+	m, ok := (*dest.(*any)).(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", *dest.(*any))
+	}
+	if m["id"] != "p1" {
+		t.Errorf("id: got %v, want p1", m["id"])
+	}
+}
+
+func validateMapPopulated(t *testing.T, dest any) {
+	t.Helper()
+	m := *dest.(*map[string]any)
+	if m["id"] != "p1" {
+		t.Errorf("id: got %v, want p1", m["id"])
 	}
 }
 
@@ -1198,38 +1255,50 @@ func TestMarshalRawMerged(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			got, err := marshalRawMerged(tc.input)
-			if tc.wantErr {
-				if err == nil {
-					t.Error("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			// Round-trip: unmarshal back and compare maps.
-			var decoded rawMerged
-			if err := json.Unmarshal(got, &decoded); err != nil {
-				t.Fatalf("round-trip unmarshal failed: %v (input: %s)", err, got)
-			}
-			if len(decoded) != len(tc.input) {
-				t.Fatalf("round-trip key count: want %d, got %d", len(tc.input), len(decoded))
-			}
-			for k, wantRaw := range tc.input {
-				gotRaw, ok := decoded[k]
-				if !ok {
-					t.Errorf("key %q missing in round-trip output", k)
-					continue
-				}
-				var wantVal, gotVal any
-				_ = json.Unmarshal(wantRaw, &wantVal)
-				_ = json.Unmarshal(gotRaw, &gotVal)
-				if !reflect.DeepEqual(wantVal, gotVal) {
-					t.Errorf("key %q: want %v, got %v", k, wantVal, gotVal)
-				}
-			}
+			runMarshalRawMergedCase(t, tc.input, tc.wantErr)
 		})
+	}
+}
+
+// runMarshalRawMergedCase executes one TestMarshalRawMerged subtest.
+func runMarshalRawMergedCase(t *testing.T, input rawMerged, wantErr bool) {
+	t.Helper()
+	got, err := marshalRawMerged(input)
+	if wantErr {
+		if err == nil {
+			t.Error("expected error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var decoded rawMerged
+	if err := json.Unmarshal(got, &decoded); err != nil {
+		t.Fatalf("round-trip unmarshal failed: %v (input: %s)", err, got)
+	}
+	if len(decoded) != len(input) {
+		t.Fatalf("round-trip key count: want %d, got %d", len(input), len(decoded))
+	}
+	assertRawMergedEqual(t, input, decoded)
+}
+
+// assertRawMergedEqual decodes the matching raw bytes of input and decoded
+// and reports any key whose decoded value differs.
+func assertRawMergedEqual(t *testing.T, input, decoded rawMerged) {
+	t.Helper()
+	for k, wantRaw := range input {
+		gotRaw, ok := decoded[k]
+		if !ok {
+			t.Errorf("key %q missing in round-trip output", k)
+			continue
+		}
+		var wantVal, gotVal any
+		_ = json.Unmarshal(wantRaw, &wantVal)
+		_ = json.Unmarshal(gotRaw, &gotVal)
+		if !reflect.DeepEqual(wantVal, gotVal) {
+			t.Errorf("key %q: want %v, got %v", k, wantVal, gotVal)
+		}
 	}
 }
 

@@ -67,45 +67,46 @@ func TestMarshalURLPlanSpec_RoundTrip(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			plan, err := federation.BuildPlan(sg, tc.query, "")
-			if err != nil {
-				t.Fatalf("BuildPlan: %v", err)
-			}
-
-			specJSON, err := MarshalURLPlanSpec(plan)
-			if err != nil {
-				t.Fatalf("MarshalURLPlanSpec: %v", err)
-			}
-
-			// The spec must not contain subgraph enum names — only URLs.
-			if strings.Contains(specJSON, "subgraphEnum") {
-				t.Error("specJSON contains 'subgraphEnum'; expected URL-keyed format")
-			}
-			if !strings.Contains(specJSON, tc.wantFetchURLPart) {
-				t.Errorf(
-					"specJSON missing expected URL part %q:\n%s",
-					tc.wantFetchURLPart,
-					specJSON,
-				)
-			}
-
-			// Round-trip: ResolveURLSpec must decode back to a valid Plan.
-			resolved, err := execengine.ResolveURLSpec(specJSON)
-			if err != nil {
-				t.Fatalf("ResolveURLSpec: %v", err)
-			}
-			if len(resolved.Fetches) == 0 {
-				t.Error("resolved plan has no fetches")
-			}
-			if !strings.Contains(resolved.Fetches[0].URL, tc.wantFetchURLPart) {
-				t.Errorf("resolved fetch URL %q does not contain %q",
-					resolved.Fetches[0].URL, tc.wantFetchURLPart)
-			}
-
-			if tc.wantEntityFetch && len(resolved.EntityFetches) == 0 {
-				t.Error("expected entity fetches in resolved plan")
-			}
+			runURLPlanSpecCase(t, sg, tc.query, tc.wantFetchURLPart, tc.wantEntityFetch)
 		})
+	}
+}
+
+// runURLPlanSpecCase executes one TestMarshalURLPlanSpec_RoundTrip subtest.
+func runURLPlanSpecCase(
+	t *testing.T,
+	sg *federation.Supergraph,
+	query, wantFetchURLPart string,
+	wantEntityFetch bool,
+) {
+	t.Helper()
+	plan, err := federation.BuildPlan(sg, query, "")
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	specJSON, err := MarshalURLPlanSpec(plan)
+	if err != nil {
+		t.Fatalf("MarshalURLPlanSpec: %v", err)
+	}
+	if strings.Contains(specJSON, "subgraphEnum") {
+		t.Error("specJSON contains 'subgraphEnum'; expected URL-keyed format")
+	}
+	if !strings.Contains(specJSON, wantFetchURLPart) {
+		t.Errorf("specJSON missing expected URL part %q:\n%s", wantFetchURLPart, specJSON)
+	}
+	resolved, err := execengine.ResolveURLSpec(specJSON)
+	if err != nil {
+		t.Fatalf("ResolveURLSpec: %v", err)
+	}
+	if len(resolved.Fetches) == 0 {
+		t.Error("resolved plan has no fetches")
+	}
+	if !strings.Contains(resolved.Fetches[0].URL, wantFetchURLPart) {
+		t.Errorf("resolved fetch URL %q does not contain %q",
+			resolved.Fetches[0].URL, wantFetchURLPart)
+	}
+	if wantEntityFetch && len(resolved.EntityFetches) == 0 {
+		t.Error("expected entity fetches in resolved plan")
 	}
 }
 
@@ -133,47 +134,53 @@ func TestMarshalEnumPlanSpec_RoundTrip(t *testing.T) {
 
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			plan, err := federation.BuildPlan(sg, tc.query, "")
-			if err != nil {
-				t.Fatalf("BuildPlan: %v", err)
-			}
-
-			specJSON, err := MarshalEnumPlanSpec(plan)
-			if err != nil {
-				t.Fatalf("MarshalEnumPlanSpec: %v", err)
-			}
-
-			// The spec must use subgraphEnum keys, not literal URLs.
-			if !strings.Contains(specJSON, "subgraphEnum") {
-				t.Errorf("specJSON missing 'subgraphEnum'; got:\n%s", specJSON)
-			}
-			if strings.Contains(specJSON, "PRODUCTS_URL") {
-				t.Error("specJSON contains URL placeholder; expected enum-keyed format")
-			}
-			if !strings.Contains(specJSON, tc.wantEnum) {
-				t.Errorf("specJSON missing expected enum %q:\n%s", tc.wantEnum, specJSON)
-			}
-
-			// Round-trip: Resolve must decode back to a valid Plan when given a URL map.
-			urls := map[string]string{
-				"PRODUCTS":  "https://products.example.com/graphql",
-				"INVENTORY": "https://inventory.example.com/graphql",
-			}
-			resolved, err := execengine.Resolve(specJSON, urls)
-			if err != nil {
-				t.Fatalf("Resolve: %v", err)
-			}
-			if len(resolved.Fetches) == 0 {
-				t.Fatal("resolved plan has no fetches")
-			}
-			if resolved.Fetches[0].URL != urls[tc.wantEnum] {
-				t.Errorf("resolved fetch URL: got %q, want %q",
-					resolved.Fetches[0].URL, urls[tc.wantEnum])
-			}
-			if tc.wantEntityFetch && len(resolved.EntityFetches) == 0 {
-				t.Error("expected entity fetches in resolved plan")
-			}
+			runEnumPlanSpecCase(t, sg, tc.query, tc.wantEnum, tc.wantEntityFetch)
 		})
+	}
+}
+
+// runEnumPlanSpecCase executes one TestMarshalEnumPlanSpec_RoundTrip subtest.
+func runEnumPlanSpecCase(
+	t *testing.T,
+	sg *federation.Supergraph,
+	query, wantEnum string,
+	wantEntityFetch bool,
+) {
+	t.Helper()
+	plan, err := federation.BuildPlan(sg, query, "")
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	specJSON, err := MarshalEnumPlanSpec(plan)
+	if err != nil {
+		t.Fatalf("MarshalEnumPlanSpec: %v", err)
+	}
+	if !strings.Contains(specJSON, "subgraphEnum") {
+		t.Errorf("specJSON missing 'subgraphEnum'; got:\n%s", specJSON)
+	}
+	if strings.Contains(specJSON, "PRODUCTS_URL") {
+		t.Error("specJSON contains URL placeholder; expected enum-keyed format")
+	}
+	if !strings.Contains(specJSON, wantEnum) {
+		t.Errorf("specJSON missing expected enum %q:\n%s", wantEnum, specJSON)
+	}
+	urls := map[string]string{
+		"PRODUCTS":  "https://products.example.com/graphql",
+		"INVENTORY": "https://inventory.example.com/graphql",
+	}
+	resolved, err := execengine.Resolve(specJSON, urls)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resolved.Fetches) == 0 {
+		t.Fatal("resolved plan has no fetches")
+	}
+	if resolved.Fetches[0].URL != urls[wantEnum] {
+		t.Errorf("resolved fetch URL: got %q, want %q",
+			resolved.Fetches[0].URL, urls[wantEnum])
+	}
+	if wantEntityFetch && len(resolved.EntityFetches) == 0 {
+		t.Error("expected entity fetches in resolved plan")
 	}
 }
 

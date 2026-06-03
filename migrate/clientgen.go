@@ -29,7 +29,7 @@ type Data struct {
 }
 
 // Render executes the embedded client.gotpl template and returns Go source. Pure.
-func Render(d Data) (string, error) {
+func Render(d *Data) (string, error) {
 	tmpl, err := template.New("client").Parse(clientTemplate)
 	if err != nil {
 		return "", fmt.Errorf("migrate: parse client template: %w", err)
@@ -49,9 +49,9 @@ func DataFromDir(
 	modulePath string,
 	subgraphs []SubgraphEntry,
 	flavors AuthFlavors,
-) Data {
+) *Data {
 	serviceName := filepath.Base(dir)
-	return Data{
+	return &Data{
 		ServiceName:     serviceName,
 		ServiceDir:      dir,
 		PackageName:     "cross_service",

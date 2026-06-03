@@ -32,7 +32,7 @@ func extractQueriesFromGoFile(filename string, log io.Writer) ([]embeddedQuery, 
 	fset := goToken.NewFileSet()
 	f, err := goParser.ParseFile(fset, filename, nil, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("generator: parse %q: %w", filename, err)
 	}
 
 	var queries []embeddedQuery

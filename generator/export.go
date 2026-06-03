@@ -2,6 +2,7 @@ package generator
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 
 	"github.com/gqlgo/gqlgenc/clientgenv2"
@@ -27,7 +28,10 @@ func exportOperations(path string, ops []*clientgenv2.Operation) error {
 	}
 	b, err := json.MarshalIndent(exported, "", "  ")
 	if err != nil {
-		return err
+		return fmt.Errorf("generator: marshal operations manifest: %w", err)
 	}
-	return os.WriteFile(path, append(b, '\n'), 0o644)
+	if err := os.WriteFile(path, append(b, '\n'), 0o644); err != nil {
+		return fmt.Errorf("generator: write operations manifest %q: %w", path, err)
+	}
+	return nil
 }
