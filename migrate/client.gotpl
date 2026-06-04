@@ -119,6 +119,9 @@ func newLocaleUserFederationClient(ctx jobsCtx, kaLocale string) {{.ImportAlias}
 // newJobFederationClient builds a FederationClient from an already-chosen
 // *http.Client and a service-discovery client, resolving subgraph URLs on
 // every call. All the per-auth-mode constructors funnel through here.
+// The WithGQLClientFor option mirrors newFederationClient: in tests opted in
+// via defederatorcompat.WithMode, dispatch through the gqlclient mock so
+// existing Mux-based mocks keep working after migration. No-op in production.
 func newJobFederationClient(httpClient *http.Client, sd service_discovery.Client) {{.ImportAlias}}.FederationClient {
 	return {{.ImportAlias}}.NewClientWithFactories(
 		func(_ context.Context) *http.Client { return httpClient },
@@ -129,6 +132,15 @@ func newJobFederationClient(httpClient *http.Client, sd service_discovery.Client
 			}
 			return {{.ImportAlias}}.Resolve(specJSON, urls)
 		},
+		{{.ImportAlias}}.WithGQLClientFor(func(callCtx context.Context) graphql.Client {
+			if !defederatorcompat.IsMode(callCtx) {
+				return nil
+			}
+			if gc, ok := callCtx.(gqlclient.KAContext); ok {
+				return gc.GraphQL().AsServiceAdmin()
+			}
+			return nil
+		}),
 	)
 }
 {{- end}}

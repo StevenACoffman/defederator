@@ -60,6 +60,37 @@ func TestRender_ContainsExpected(t *testing.T) {
 	}
 }
 
+func TestRender_MultiAuthContainsJobClientTestCompat(t *testing.T) {
+	// In the multi-flavor case, hand-written wrappers funnel through
+	// newJobFederationClient (not newFederationClient). Verify the test-compat
+	// option also wires through that constructor — otherwise tests calling
+	// e.g. NewAdminFederationClient bypass the gqlclient mock entirely.
+	d := *testData
+	d.AuthFlavors = AuthFlavors{User: true, Admin: true}
+	got, err := Render(&d)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "func newJobFederationClient(") {
+		t.Fatalf("multi-auth output is missing newJobFederationClient")
+	}
+	// Slice out the body of newJobFederationClient so we only check its option list.
+	jobStart := strings.Index(got, "func newJobFederationClient(")
+	if jobStart < 0 {
+		t.Fatalf("could not locate newJobFederationClient start")
+	}
+	jobBody := got[jobStart:]
+	for _, want := range []string{
+		"defed.WithGQLClientFor(",
+		"defederatorcompat.IsMode(callCtx)",
+		"gc.GraphQL().AsServiceAdmin()",
+	} {
+		if !strings.Contains(jobBody, want) {
+			t.Errorf("newJobFederationClient body is missing %q", want)
+		}
+	}
+}
+
 func TestRender_Golden(t *testing.T) {
 	got, err := Render(testData)
 	if err != nil {
