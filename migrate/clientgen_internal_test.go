@@ -42,6 +42,16 @@ func TestRender_ContainsExpected(t *testing.T) {
 		`(&url.URL{`,
 		`Path:   "/backend-graphql/"`,
 		"DO NOT EDIT",
+		// Test-compat wiring: newFederationClient pulls graphql.Client out
+		// of ctx at runtime via a type assertion (gqlclient.KAContext
+		// is not required by federationCtx itself, so narrow CLI/script
+		// contexts still satisfy it).
+		`"github.com/Khan/webapp/pkg/lib/defederatorcompat"`,
+		`"github.com/Khan/genqlient/graphql"`,
+		"defed.WithGQLClientFor(",
+		"defederatorcompat.IsMode(callCtx)",
+		"callCtx.(gqlclient.KAContext)",
+		"gc.GraphQL().AsServiceAdmin()",
 	}
 	for _, want := range checks {
 		if !strings.Contains(got, want) {

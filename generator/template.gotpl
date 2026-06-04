@@ -2,6 +2,7 @@
 	{{ reserveImport "context" }}
 	{{ reserveImport "fmt" }}
 	{{ reserveImport "net/http" }}
+	{{ reserveImport "github.com/Khan/genqlient/graphql" }}
 	{{- if .HasTypedEntityFetch }}{{ reserveImport "encoding/json" }}{{ end }}
 
 	{{- range $model := .Operation}}
@@ -22,28 +23,50 @@
 	// for simple cases; use NewClientWithFactories for webapp-style per-request URL
 	// resolution via service discovery.
 	type Client struct {
-	    httpFor    func(context.Context) *http.Client
-	    resolveFor func(ctx context.Context, specJSON string) (*Plan, error)
+	    httpFor      func(context.Context) *http.Client
+	    resolveFor   func(ctx context.Context, specJSON string) (*Plan, error)
+	    // gqlClientFor, when non-nil and returning non-nil for a given ctx,
+	    // routes each operation through that graphql.Client using the composed
+	    // federated Document. Used by webapp tests to keep gqlclient.Mux-based
+	    // mocks working unchanged after migration. nil in production.
+	    gqlClientFor func(context.Context) graphql.Client
+	}
+
+	// ClientOption configures optional behaviour on a *Client at construction time.
+	// All ClientOptions are safe to omit; the zero set yields the production
+	// federation HTTP path.
+	type ClientOption func(*Client)
+
+	// WithGQLClientFor configures the client to route operations through the
+	// graphql.Client returned by f when both f and f(ctx) are non-nil. Use this
+	// in test harnesses to dispatch operations through a gqlclient.Mux-backed
+	// mock instead of the federation HTTP path. f is called once per operation
+	// invocation; returning nil from f tells the client to use the federation
+	// HTTP path for that call. Production code never passes this option.
+	func WithGQLClientFor(f func(context.Context) graphql.Client) ClientOption {
+	    return func(c *Client) { c.gqlClientFor = f }
 	}
 
     {{- if .URLModeEnum }}
     // NewClient builds the federation client with a fixed HTTP client and static
     // subgraph URLs. subgraphURLs maps join__Graph enum names (e.g. "USERS") to their
     // actual HTTP endpoints. All enum names referenced by any operation must be present;
-    // missing entries are caught at construction time.
-    func NewClient(httpClient *http.Client, subgraphURLs map[string]string) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+    // missing entries are caught at construction time. Accepts ClientOptions for
+    // optional behaviour such as WithGQLClientFor (test-only).
+    func NewClient(httpClient *http.Client, subgraphURLs map[string]string, opts ...ClientOption) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
         if httpClient == nil {
             httpClient = http.DefaultClient
         }
-        return NewClientWithHTTPFactory(func(_ context.Context) *http.Client { return httpClient }, subgraphURLs)
+        return NewClientWithHTTPFactory(func(_ context.Context) *http.Client { return httpClient }, subgraphURLs, opts...)
     }
 
     // NewClientWithHTTPFactory builds the federation client with a per-call HTTP factory
     // and static subgraph URLs. httpFactory is called on every operation with the request
     // context, allowing callers to supply a context-scoped HTTP client (e.g. one that
     // carries per-request auth headers or tracing). subgraphURLs maps join__Graph enum
-    // names (e.g. "USERS") to their actual HTTP endpoints.
-    func NewClientWithHTTPFactory(httpFactory func(context.Context) *http.Client, subgraphURLs map[string]string) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+    // names (e.g. "USERS") to their actual HTTP endpoints. Accepts ClientOptions for
+    // optional behaviour such as WithGQLClientFor (test-only).
+    func NewClientWithHTTPFactory(httpFactory func(context.Context) *http.Client, subgraphURLs map[string]string, opts ...ClientOption) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
         if httpFactory == nil {
             httpFactory = func(_ context.Context) *http.Client { return http.DefaultClient }
         }
@@ -60,10 +83,14 @@
                 return nil, fmt.Errorf("federation client: validate plan for %q: %w", opName, err)
             }
         }
-        return &Client{
+        c := &Client{
             httpFor:    httpFactory,
             resolveFor: func(_ context.Context, specJSON string) (*Plan, error) { return Resolve(specJSON, subgraphURLs) },
-        }, nil
+        }
+        for _, opt := range opts {
+            opt(c)
+        }
+        return c, nil
     }
 
     // NewClientWithFactories builds the federation client with per-call factories for
@@ -72,28 +99,36 @@
     // resolveFor receives the full operation's plan-spec JSON and must return a resolved
     // Plan; it may call Resolve(specJSON, urls) with URLs fetched from the context.
     // Unlike NewClient, this constructor does not validate plans at construction time.
+    // Accepts ClientOptions for optional behaviour such as WithGQLClientFor (test-only).
     func NewClientWithFactories(
         httpFactory func(context.Context) *http.Client,
         resolveFor func(ctx context.Context, specJSON string) (*Plan, error),
+        opts ...ClientOption,
     ) {{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }} {
         if httpFactory == nil {
             httpFactory = func(_ context.Context) *http.Client { return http.DefaultClient }
         }
-        return &Client{httpFor: httpFactory, resolveFor: resolveFor}
+        c := &Client{httpFor: httpFactory, resolveFor: resolveFor}
+        for _, opt := range opts {
+            opt(c)
+        }
+        return c
     }
     {{- else }}
     // NewClient builds the federation client with a fixed HTTP client. URLs are baked
     // into the plan specs at code-generation time and require no URL map at runtime.
-    func NewClient(httpClient *http.Client) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+    // Accepts ClientOptions for optional behaviour such as WithGQLClientFor (test-only).
+    func NewClient(httpClient *http.Client, opts ...ClientOption) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
         if httpClient == nil {
             httpClient = http.DefaultClient
         }
-        return NewClientWithHTTPFactory(func(_ context.Context) *http.Client { return httpClient })
+        return NewClientWithHTTPFactory(func(_ context.Context) *http.Client { return httpClient }, opts...)
     }
 
     // NewClientWithHTTPFactory builds the federation client with a per-call HTTP factory.
-    // httpFactory is called on every operation with the request context.
-    func NewClientWithHTTPFactory(httpFactory func(context.Context) *http.Client) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
+    // httpFactory is called on every operation with the request context. Accepts
+    // ClientOptions for optional behaviour such as WithGQLClientFor (test-only).
+    func NewClientWithHTTPFactory(httpFactory func(context.Context) *http.Client, opts ...ClientOption) ({{- if .ClientInterfaceName }} {{ .ClientInterfaceName }} {{- else }} *Client {{- end }}, error) {
         if httpFactory == nil {
             httpFactory = func(_ context.Context) *http.Client { return http.DefaultClient }
         }
@@ -109,10 +144,14 @@
                 return nil, fmt.Errorf("federation client: validate plan for %q: %w", opName, err)
             }
         }
-        return &Client{
+        c := &Client{
             httpFor:    httpFactory,
             resolveFor: func(_ context.Context, specJSON string) (*Plan, error) { return ResolveURLSpec(specJSON) },
-        }, nil
+        }
+        for _, opt := range opts {
+            opt(c)
+        }
+        return c, nil
     }
     {{- end}}
 
@@ -194,14 +233,35 @@ var All{{ $enum.GoName }} = []{{ $enum.GoName }}{
 
 	{{- if $.GenerateClient }}
 		func (c *Client) {{ $model.Name|go }} (ctx context.Context{{- range $arg := .Args }}, {{ $arg.Variable | goPrivate }} {{ $arg.Type | ref }} {{- end }}) (*{{ $model.ResponseStructName | go }}, error) {
-			plan, err := c.resolveFor(ctx, {{ $model.Name|go }}PlanSpec)
-			if err != nil {
-				return nil, fmt.Errorf("{{ $model.Name }}: resolve plan: %w", err)
-			}
 			_opVars := map[string]any{
 			{{- range $args := .VariableDefinitions}}
 				"{{ $args.Variable }}": {{ $args.Variable | goPrivate }},
 			{{- end }}
+			}
+
+			// Test-compat path: when gqlClientFor is wired (test harness only)
+			// and returns a non-nil graphql.Client for this ctx, dispatch the
+			// composed federated query through it. This lets gqlclient.Mux-based
+			// mocks registered with the operation's name keep working unchanged
+			// after migration. Production code never wires gqlClientFor.
+			if c.gqlClientFor != nil {
+				if gc := c.gqlClientFor(ctx); gc != nil {
+					var res {{ $model.ResponseStructName | go }}
+					req := &graphql.Request{
+						OpName:    "{{ $model.Name }}",
+						Query:     {{ $model.Name|go }}Document,
+						Variables: _opVars,
+					}
+					if err := gc.MakeRequest(ctx, req, &graphql.Response{Data: &res}); err != nil {
+						return nil, err
+					}
+					return &res, nil
+				}
+			}
+
+			plan, err := c.resolveFor(ctx, {{ $model.Name|go }}PlanSpec)
+			if err != nil {
+				return nil, fmt.Errorf("{{ $model.Name }}: resolve plan: %w", err)
 			}
 
 			var res {{ $model.ResponseStructName | go }}

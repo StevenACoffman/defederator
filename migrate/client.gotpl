@@ -7,20 +7,24 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/Khan/genqlient/graphql"
+	"github.com/Khan/webapp/pkg/lib/defederatorcompat"
 	"github.com/Khan/webapp/pkg/lib/errors"
 	"github.com/Khan/webapp/pkg/lib/httpctx"
 	"github.com/Khan/webapp/pkg/lib/service_discovery"
 	"github.com/Khan/webapp/pkg/web"
-{{- if .AuthFlavors.Multi}}
 	"github.com/Khan/webapp/pkg/web/gqlclient"
-{{- end}}
 	{{.ImportAlias}} "{{.DefedImportPath}}"
 )
 
 // federationCtx is the minimal context the per-request federation client needs:
 // HTTP transport from the request context and service discovery for subgraph URL
 // resolution. Use newFederationClient for handlers that propagate the caller's
-// auth via the incoming HTTP transport.
+// auth via the incoming HTTP transport. The test-compat path inside
+// newFederationClient checks for gqlclient.KAContext at runtime — callers that
+// happen to also satisfy gqlclient.KAContext (i.e. the full webapp ktx in
+// tests) opt in via defederatorcompat.WithMode; callers without it (CLI tools,
+// narrower contexts) fall through unaffected to the federation HTTP path.
 type federationCtx interface {
 	context.Context
 	web.ServiceVersionContext
@@ -29,7 +33,10 @@ type federationCtx interface {
 }
 
 // newFederationClient returns a FederationClient whose HTTP transport and subgraph
-// URLs are resolved fresh from ctx on every operation call.
+// URLs are resolved fresh from ctx on every operation call. In tests where the
+// suite has called defederatorcompat.WithMode(ctx), per-operation calls dispatch
+// through the gqlclient mock using the composed federated query — keeping existing
+// gqlclient.Mux-based mocks working unchanged after migration from genqlient.
 func newFederationClient(ctx federationCtx) {{.ImportAlias}}.FederationClient {
 	return {{.ImportAlias}}.NewClientWithFactories(
 		func(callCtx context.Context) *http.Client {
@@ -45,6 +52,17 @@ func newFederationClient(ctx federationCtx) {{.ImportAlias}}.FederationClient {
 			}
 			return {{.ImportAlias}}.Resolve(specJSON, urls)
 		},
+		{{.ImportAlias}}.WithGQLClientFor(func(callCtx context.Context) graphql.Client {
+			// Return nil unless the test harness has opted in. Production never
+			// sets the mode signal, so this branch is a no-op in prod.
+			if !defederatorcompat.IsMode(callCtx) {
+				return nil
+			}
+			if gc, ok := callCtx.(gqlclient.KAContext); ok {
+				return gc.GraphQL().AsServiceAdmin()
+			}
+			return nil
+		}),
 	)
 }
 
