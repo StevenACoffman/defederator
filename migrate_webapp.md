@@ -511,6 +511,37 @@ Webapp's `ka-visibility` lint also rejects underscore-prefixed identifiers in us
 > ```
 > Fix: rename `_metricsCtx` → `metricsCtx`. Generalises: any underscore-prefixed type used across files in a package will need renaming during migration.
 
+### 8. Hand-edited mock response field name mismatches
+
+The defederator's design preserves the gqlclient.Mux dispatch path so existing `cross_service/*_mocks.go` files keep working unchanged (see `genqlient.md`). The trap: when manually broadening a mock that previously returned `js.Obj{}` to a fuller response shape during migration cleanup, the top-level field in the response object must match the **GraphQL selection name in the @genqlient query string**, not the operation name.
+
+This is easy to get wrong when the operation is named for *what it does* but the selected field has a different name. The operation name often appears in the variable identifier and in the Go method name, masking the divergence.
+
+> ai-guide service, `cross_service/user_mocks.go`:
+> ```go
+> // Query selects updateUserRole, but mock returned markUserAsRole:
+> _ = `# @genqlient
+>     mutation AiGuide_MarkUserAsRole($kaid: String!, $role: UserRole!) {
+>         updateUserRole(role: $role, operation: ADD, kaid: $kaid) {
+>             error { code }
+>         }
+>     }
+> `
+>
+> // Wrong — field name matches the operation, not the selection:
+> js.Obj{
+>     "markUserAsRole": js.Obj{"kaid": "some-kaid"},
+> }
+>
+> // Right — field name matches the GraphQL selection:
+> js.Obj{
+>     "updateUserRole": js.Obj{"error": nil},
+> }
+> ```
+> Symptom: `gqlclient.testing.go` validates the mocked response against the federated schema and panics with `field not in query, path = markUserAsRole`. The original `js.Obj{}` mock was fine — there is no need to broaden the response shape during migration unless the test actually inspects the returned data.
+
+Rule of thumb: if a pre-migration mock returned `js.Obj{}` and the corresponding `cross_service/` function no longer uses `gqlclient.ErrorInFrameworkOrResponse(err, resp)` (i.e. the response value isn't consulted), leave the mock at `js.Obj{}`. Only expand the mock response when the caller actually reads fields out of it.
+
 ---
 
 ### Takeaways for future migrations
@@ -523,5 +554,6 @@ The categories above sort roughly by how often they recurred:
 4. **Binding gaps (4a–4b)** are inherent to keeping both clients — the safelist + task-dispatch lints need genqlient references regardless of defederator.
 5. **Latent user-code bugs (5a–5d)** are one-time costs per service: typed generation surfaces them at compile time, which is the point.
 6. **Lint debt (6, 7)** is the long tail. Mostly mechanical; the script handles it.
+7. **Hand-edited mocks (8)** are avoidable. Leave mocks alone unless the caller actually reads the response; the defederator preserves the dispatch path so `js.Obj{}` mocks keep working unchanged.
 
 When migrating a new service, expect to encounter (3a)–(3e) and (5a)–(5d) consistently. The codegen and registration categories (1, 2) are mostly closed; new instances would represent genuinely new schema shapes.
