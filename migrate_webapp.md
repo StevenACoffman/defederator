@@ -494,12 +494,21 @@ When defederator started emitting typed enum / typed pointer fields where the ge
 
 ### 6. Pre-existing webapp lint debt revealed by recompilation
 
-Stricter recompilation of every cross-service caller surfaced ~145 `ka-context-interface` (ADR-429) violations — functions whose `ctx interface { … }` declaration doesn't list every transitively-used KAContext. These are not bugs in defederator; they're tech debt the package previously hid because nothing forced rebuilds at the touched call sites. Mechanical fix via a script (`/tmp/claude/fix_ka_context_interface.py`) that adds/removes interfaces based on the lint suggestions, plus `goimports -w` to clean up the imports.
+Stricter recompilation of every cross-service caller surfaces `ka-context-interface` (ADR-429) violations — functions whose `ctx interface { … }` declaration doesn't list every transitively-used KAContext. These are not bugs in defederator; they're tech debt the package previously hid because nothing forced rebuilds at the touched call sites.
+
+**Auto-fix:** the `kacontextinterface` analyzer (`pkg/kacontext/linters/fix_interface_lint.go`) emits `analysis.SuggestedFix` records covering both the missing embed and the missing import. Run:
+
+```sh
+tools/runlint.sh --fix <changed-files-or-packages>
+```
+
+Webapp's runlint wrapper passes `--fix` through to `golangci-lint run --fix`, which applies the analyzer's edits in place. No hand-editing and no goimports pass required — the analyzer's `buildAddFix` writes the embed and adds the import path together. Rerun lint after the fix to confirm clean.
 
 > rostering files, ~140 sites:
 > ```
 > ctx uses but does not explicitly request interface(s) context.Context, httpctx.KAContext, service_discovery.KAContext, web.ServiceVersionContext
 > ```
+> Each site is fixable with `tools/runlint.sh --fix <file>`.
 
 ### 7. Visibility convention applied to user type aliases
 
@@ -553,7 +562,7 @@ The categories above sort roughly by how often they recurred:
 3. **Migrate output bugs (3a–3e)** were caught by the first webapp service. Subsequent services hit the same fixes.
 4. **Binding gaps (4a–4b)** are inherent to keeping both clients — the safelist + task-dispatch lints need genqlient references regardless of defederator.
 5. **Latent user-code bugs (5a–5d)** are one-time costs per service: typed generation surfaces them at compile time, which is the point.
-6. **Lint debt (6, 7)** is the long tail. Mostly mechanical; the script handles it.
+6. **Lint debt (6, 7)** is the long tail. Mostly mechanical; `tools/runlint.sh --fix` applies the kacontextinterface analyzer's SuggestedFix records in place, including imports.
 7. **Hand-edited mocks (8)** are avoidable. Leave mocks alone unless the caller actually reads the response; the defederator preserves the dispatch path so `js.Obj{}` mocks keep working unchanged.
 
 When migrating a new service, expect to encounter (3a)–(3e) and (5a)–(5d) consistently. The codegen and registration categories (1, 2) are mostly closed; new instances would represent genuinely new schema shapes.

@@ -200,7 +200,14 @@ func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 	// Chain into generate using the just-written .defederator.yml. dir may be
 	// relative; generateAt resolves it via LoadConfigFromDir's ancestor walk.
-	return generateAt(ctx, "", dir, verbose, stdout, stderr)
+	if err := generateAt(ctx, "", dir, verbose, stdout, stderr); err != nil {
+		return err
+	}
+	// printNextSteps was suppressed because we chained into generate. Surface
+	// just the lint-fix hint, which is the one post-migration step the user
+	// still needs to run themselves.
+	_, _ = fmt.Fprintf(stdout, "migrate: %s\n", migrate.LintFixHint())
+	return nil
 }
 
 func runHelp(stdout io.Writer) error {

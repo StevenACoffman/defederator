@@ -218,6 +218,17 @@ func printNextSteps(abs string) {
 		os.Stdout,
 		"  3. Update cross_service call sites to use the new FederationClient.\n",
 	)
+	_, _ = fmt.Fprintf(os.Stdout, "  4. %s\n", LintFixHint())
+}
+
+// LintFixHint returns the single-line suggestion printed after a successful
+// migrate run. After recompilation, the webapp kacontextinterface analyzer
+// (ADR-429) commonly flags ctx interfaces that now transitively reference
+// service_discovery.KAContext. The analyzer emits SuggestedFix records that
+// golangci-lint applies in place when invoked with --fix, so the user can
+// resolve the whole batch with one command rather than hand-editing each site.
+func LintFixHint() string {
+	return "Apply ka-context-interface fixes: tools/runlint.sh --fix <changed-files-or-packages>"
 }
 
 // writeFile writes data to path, respecting DryRun and Force options.
