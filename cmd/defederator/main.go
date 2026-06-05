@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/StevenACoffman/defederator/check"
 	"github.com/StevenACoffman/defederator/config"
 	"github.com/StevenACoffman/defederator/generator"
 	"github.com/StevenACoffman/defederator/migrate"
@@ -51,6 +52,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return runMigrate(ctx, args[2:], stdout, stderr)
 		case "generate":
 			return runGenerate(ctx, args[2:], stdout, stderr)
+		case "check":
+			return runCheck(args[2:], stdout, stderr)
 		case "version":
 			printVersion(stdout)
 			return nil
@@ -58,7 +61,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 			return runHelp(stdout)
 		default:
 			return fmt.Errorf(
-				"unknown subcommand %q; valid subcommands: generate, migrate, version, help",
+				"unknown subcommand %q; valid subcommands: generate, migrate, check, version, help",
 				args[1],
 			)
 		}
@@ -210,12 +213,46 @@ func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	return nil
 }
 
+// runCheck dispatches the `check` subcommand: scans a service directory for
+// `genqlient.<Op>(...)` calls lacking a backing `# @genqlient` annotation
+// block. Orphans are written to stdout; the subcommand exits non-zero when
+// any are found so CI can fail on the regression class. ctx is unused — the
+// scan is local, fast, and cancellation-insensitive.
+func runCheck(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("defederator: parse check flags: %w", err)
+	}
+	if fs.NArg() != 1 {
+		return errors.New(
+			"check requires exactly one argument: <service-dir>\nusage: defederator check <service-dir>",
+		)
+	}
+	dir := fs.Arg(0)
+	orphans, err := check.Run(dir)
+	if err != nil {
+		return fmt.Errorf("defederator: check: %w", err)
+	}
+	for _, o := range orphans {
+		_, _ = fmt.Fprintf(
+			stdout, "%s:%d: genqlient.%s (no @genqlient annotation declaring it)\n",
+			o.File, o.Line, o.Operation,
+		)
+	}
+	if len(orphans) > 0 {
+		return fmt.Errorf("defederator: check: %d orphaned genqlient calls", len(orphans))
+	}
+	return nil
+}
+
 func runHelp(stdout io.Writer) error {
 	fmt.Fprint(stdout, `defederator — typed Go federation client generator
 
 Usage:
   defederator [generate] [flags]      Generate a federation client (default)
   defederator migrate <dir> [flags]   Migrate a genqlient service to defederator
+  defederator check <dir>             Report orphaned genqlient calls in <dir>
   defederator version                 Print binary version + git SHA
   defederator help                    Show this help
 
@@ -229,6 +266,9 @@ migrate flags:
   --dry-run      print what would be written without writing files
   --no-generate  skip the chained 'defederator generate' step
   --verbose, -v  print per-file and per-operation progress on stderr
+
+check exits non-zero when one or more orphaned genqlient calls are found
+(calls to genqlient.<Op>(...) with no backing # @genqlient annotation block).
 `)
 	return nil
 }
