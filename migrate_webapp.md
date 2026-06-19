@@ -325,6 +325,32 @@ These files must be committed alongside the config and client scaffold.
 
 ---
 
+## Verifying after migration
+
+After running `defederator migrate` — and after any subsequent edit that touches `cross_service/` files — run `defederator check` to detect orphaned `genqlient.<Op>(...)` calls (calls whose operation has no backing `# @genqlient` annotation block in any of the files globbed by `genqlient.yaml:operations`).
+
+```sh
+defederator check ~/khan/webapp/services/<name>
+```
+
+Exit code `0` means clean. Non-zero exit prints each orphan as `<file>:<line>: genqlient.<Op> (no @genqlient annotation declaring it)` and is suitable for CI gates.
+
+**Why this matters:** the genqlient generator picks up operations only from `# @genqlient` annotation blocks. A migration that strips those blocks but leaves the call sites compiles only until the next `make genqlient` regen drops the unbacked operations from `generated/genqlient/queries.go`. The build then breaks at every orphaned call site, and tracing the regression back to the migration that removed the annotation can take hours. `defederator check` surfaces the same set in seconds, before the regen.
+
+Run it as part of the standard post-migration loop:
+
+```sh
+defederator migrate --force services/<name>
+defederator check services/<name> || exit 1
+# … then commit
+```
+
+`defederator check` also catches the inverse class — when a follow-up commit removes an annotation block as part of "cleanup" but the call site survives. Wiring `check` into pre-commit or CI makes that class of regression fail loudly instead of silently.
+
+See addendum §9 for the historical incident that motivated this subcommand.
+
+---
+
 ## Common problems
 
 **`join__Graph enum not found`** — the service's `genqlient.yaml` points at a schema file that is not the Federation v2 supergraph. Check that `schema:` resolves to `~/khan/webapp/gengraphql/composed_schema.graphql`.
@@ -551,6 +577,29 @@ This is easy to get wrong when the operation is named for *what it does* but the
 
 Rule of thumb: if a pre-migration mock returned `js.Obj{}` and the corresponding `cross_service/` function no longer uses `gqlclient.ErrorInFrameworkOrResponse(err, resp)` (i.e. the response value isn't consulted), leave the mock at `js.Obj{}`. Only expand the mock response when the caller actually reads fields out of it.
 
+### 9. Orphaned `genqlient.<Op>` calls — annotation stripped, call site left in place
+
+This was the most expensive class encountered. A migration commit removed `_ = `# @genqlient ...`` annotation blocks from `cross_service/` files but kept the calls to `genqlient.<Op>(...)`. The build kept compiling because `generated/genqlient/queries.go` still contained the operations from before the migration; the regression was invisible until the next `make genqlient` regen, which silently dropped the unbacked operations and broke 39 call sites across 19 files (37 in ai-guide, 2 in donations).
+
+> ai-guide service, `cross_service/fetch_all_sets_of_standards.go`:
+> ```go
+> // Migration commit stripped:
+> //   _ = `# @genqlient
+> //       query AiGuide_AllSetsOfStandards { … }
+> //   `
+> // … but kept:
+> resp, err := genqlient.AiGuide_AllSetsOfStandards(ctx, ctx.GraphQL().AsUser())
+> ```
+> Symptom (only after `make genqlient` regen): `undefined: genqlient.AiGuide_AllSetsOfStandards`.
+
+**Root cause:** the migration's intent was to switch these calls to the defederator-generated client (`cross_service/client.go`). Stripping the genqlient annotation was a step toward that end. But the call-site rewrite never happened — leaving the codebase in a half-migrated state that compiled by accident.
+
+**Detection:** `defederator check <service-dir>` scans the service for `genqlient.<Op>(...)` calls lacking a backing `@genqlient` annotation. It would have surfaced all 39 orphans in one CI run rather than at the next regen.
+
+**Prevention:** strip a `@genqlient` annotation only as part of the same commit that migrates the call site to the defederator client. Wire `defederator check` into the post-migration workflow (see "Verifying after migration" above). The check is also useful as a pre-commit hook for any commit that touches `cross_service/` files.
+
+> Sub-class: the same migration also stripped sub-directives (`# @genqlient(pointer: true)`, `# @genqlient(for: "...", pointer: true)`) from annotation blocks it kept. These don't show up as orphans — the operation is still declared — but they change the generated Go types from pointers to values (or value-typed input fields), producing `cannot use &x (type *T) as T` errors at the call site after the next regen. `defederator check` does not detect this class; the fix is to restore the directive by hand or revert the file to its pre-migration state.
+
 ---
 
 ### Takeaways for future migrations
@@ -564,5 +613,6 @@ The categories above sort roughly by how often they recurred:
 5. **Latent user-code bugs (5a–5d)** are one-time costs per service: typed generation surfaces them at compile time, which is the point.
 6. **Lint debt (6, 7)** is the long tail. Mostly mechanical; `tools/runlint.sh --fix` applies the kacontextinterface analyzer's SuggestedFix records in place, including imports.
 7. **Hand-edited mocks (8)** are avoidable. Leave mocks alone unless the caller actually reads the response; the defederator preserves the dispatch path so `js.Obj{}` mocks keep working unchanged.
+8. **Orphaned genqlient calls (9)** are the costliest class — invisible until the next genqlient regen, then they break dozens of call sites at once. Run `defederator check <service-dir>` after every migration and in CI. Strip a `@genqlient` annotation only in the same commit that migrates its call site to the defederator client.
 
-When migrating a new service, expect to encounter (3a)–(3e) and (5a)–(5d) consistently. The codegen and registration categories (1, 2) are mostly closed; new instances would represent genuinely new schema shapes.
+When migrating a new service, expect to encounter (3a)–(3e) and (5a)–(5d) consistently. The codegen and registration categories (1, 2) are mostly closed; new instances would represent genuinely new schema shapes. Run `defederator check` before committing — it pays for itself the first time it catches a stripped annotation.

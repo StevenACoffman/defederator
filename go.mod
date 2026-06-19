@@ -21,8 +21,3 @@ require (
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/tools v0.42.0 // indirect
 )
-
-replace (
-	github.com/StevenACoffman/gorouter => ../gorouter
-	github.com/gqlgo/gqlgenc => ../gqlgenc
-)
