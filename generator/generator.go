@@ -345,7 +345,7 @@ func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) *gqlgencConfig.C
 		}
 		for graphqlName, binding := range cfg.Bindings {
 			gqlCfg.Models[graphqlName] = gqlgenConfig.TypeMapEntry{
-				Model: gqlgenConfig.StringList{binding.Type},
+				Model: gqlgenConfig.StringList{translateBareBasic(binding.Type)},
 			}
 		}
 	}
@@ -354,6 +354,34 @@ func buildGqlgencConfig(cfg *defConfig.Config, cleanSDL string) *gqlgencConfig.C
 		GQLConfig: gqlCfg,
 		Query:     cfg.Query,
 	}
+}
+
+// translateBareBasic rewrites a bare Go basic-type binding (e.g. "string")
+// to its github.com/99designs/gqlgen/graphql counterpart so gqlgen's binder
+// can resolve it. Bare basics have no package, so binder.FindObject panics
+// with "package cannot be nil"; routing through graphql.<T> gives the binder
+// a real symbol to load, and the binder unwraps the marshaler function and
+// returns its first-parameter type — the underlying Go basic — so the
+// generated field's Go type is unchanged from the caller's intent.
+//
+// Inputs that don't match a known bare basic pass through unchanged:
+// fully-qualified paths like "time.Time" or
+// "github.com/Khan/webapp/pkg/content.Author", and special-cased forms like
+// "interface{}" / "map[string]any" that the binder already accepts.
+func translateBareBasic(t string) string {
+	switch t {
+	case "string":
+		return "github.com/99designs/gqlgen/graphql.String"
+	case "bool":
+		return "github.com/99designs/gqlgen/graphql.Boolean"
+	case "int", "int32":
+		return "github.com/99designs/gqlgen/graphql.Int"
+	case "int64":
+		return "github.com/99designs/gqlgen/graphql.Int64"
+	case "float32", "float64":
+		return "github.com/99designs/gqlgen/graphql.Float"
+	}
+	return t
 }
 
 func hasGraphQLExt(p string) bool {
