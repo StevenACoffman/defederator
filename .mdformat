@@ -1,0 +1,12 @@
+wrap = keep           # wrap all .md files to 80 characters - possible values: {"keep", "no", INTEGER}
+number = false        # apply consecutive numbering to ordered lists - possible values: {false, true}
+end_of_line = "lf"    # possible values: {"lf", "crlf"}
+validate = true       # options: {false, true}
+# extensions = [      # options: a list of enabled extensions (default: all installed are enabled)
+#     "gfm",
+#     "toc",
+# ]
+# codeformatters = [  # options: a list of enabled code formatter languages (default: all installed are enabled)
+#     "python",
+#     "json",
+# ]
