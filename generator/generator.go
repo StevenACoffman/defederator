@@ -231,13 +231,17 @@ func runClientGen(
 	for _, op := range operations {
 		_, _ = fmt.Fprintf(log, "Operation: %s\n", op.Name)
 	}
-	return sourceOutput{
+	out := sourceOutput{
 		fragments:          fragments,
 		operationResponses: operationResponses,
 		operations:         operations,
 		responseSubTypes:   source.ResponseSubTypes(),
 		generateCfg:        generateCfg,
-	}, nil
+	}
+	if cfg.Generate != nil && cfg.Generate.Optional == "value" {
+		applyValueOptional(&out)
+	}
+	return out, nil
 }
 
 // emitOutputs writes the rendered client, the embedded executor source, and
@@ -366,11 +370,14 @@ func buildGenerateConfig(cfg *defConfig.Config) *gqlgencConfig.GenerateConfig {
 	if cfg.Generate == nil {
 		return &gqlgencConfig.GenerateConfig{}
 	}
-	gc := &gqlgencConfig.GenerateConfig{
-		Optional: cfg.Generate.Optional,
-	}
+	gc := &gqlgencConfig.GenerateConfig{}
 	if cfg.Generate.ClientInterfaceName != nil {
 		gc.ClientInterfaceName = cfg.Generate.ClientInterfaceName
 	}
+	// NOTE: cfg.Generate.Optional ("value" / "pointer") has no upstream
+	// equivalent in gqlgenc v0.37.0. Nullable scalar pointer-wrapping is
+	// hard-coded in gqlgen's binder.CopyModifiersFromAst. Honoring "value"
+	// requires post-processing the generated AST in defederator itself —
+	// not implemented here. The field is accepted but currently ignored.
 	return gc
 }

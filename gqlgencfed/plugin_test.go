@@ -1,124 +1,141 @@
 package gqlgencfed_test
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/99designs/gqlgen/api"
 	gqlgenConfig "github.com/99designs/gqlgen/codegen/config"
 	gqlgencConfig "github.com/gqlgo/gqlgenc/config"
-	gqlgencGenerator "github.com/gqlgo/gqlgenc/generator"
+	"github.com/vektah/gqlparser/v2"
 	"github.com/vektah/gqlparser/v2/ast"
 
 	"github.com/StevenACoffman/defederator/generator"
 	"github.com/StevenACoffman/defederator/gqlgencfed"
 )
 
-func TestPluginViaGenerateGenerate(t *testing.T) {
-	supergraphRel := filepath.Join(
-		"..",
-		"..",
-		"gorouter",
-		"federation",
-		"testdata",
-		"golden",
-		"supergraph.graphql",
+type pluginFixture struct {
+	rawSDL   string
+	cleanSDL string
+}
+
+// TestPlugin_MutateConfig exercises the gqlgencfed plugin's ConfigMutator
+// interface directly. The plugin used to be wired into gqlgenc's pipeline via
+// `gqlgenc.Generate(ctx, cfg, api.ReplacePlugin(plugin))`, but gqlgenc v0.37.0
+// removed the variadic plugin-option parameter from Generate. The plugin still
+// implements plugin.ConfigMutator, so callers can invoke MutateConfig on a
+// gqlgen Config they construct themselves.
+func TestPlugin_MutateConfig(t *testing.T) {
+	t.Parallel()
+
+	fixture := loadPluginFixture(t)
+	tmpDir := t.TempDir()
+	queryFile := writeQueryFile(t, tmpDir)
+	outFile := filepath.Join(tmpDir, "client.go")
+
+	clientPkg := gqlgenConfig.PackageConfig{Filename: outFile, Package: "generated"}
+	gqlCfg := buildGqlgenConfig(t, fixture.cleanSDL)
+	plugin := gqlgencfed.NewWithFilePaths(
+		[]string{queryFile},
+		clientPkg,
+		&gqlgencConfig.GenerateConfig{},
+		fixture.rawSDL,
 	)
-	supergraphPath, err := filepath.Abs(supergraphRel)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err2 := os.Stat(supergraphPath); os.IsNotExist(err2) {
-		t.Skip("supergraph fixture not found")
+	if err := plugin.MutateConfig(gqlCfg); err != nil {
+		t.Fatalf("MutateConfig: %v", err)
 	}
 
-	sdlBytes, err := os.ReadFile(supergraphPath)
+	out := readFile(t, outFile)
+	assertContains(t, out,
+		"GetProductDocument", "GetProductPlanSpec",
+		"ResolveURLSpec", "ExecuteAndUnmarshal",
+	)
+	assertExcludes(t, out, "clientv2", "federationclient")
+
+	execFile := filepath.Join(tmpDir, "federation_exec.go")
+	if _, statErr := os.Stat(execFile); os.IsNotExist(statErr) {
+		t.Errorf("federation_exec.go not written to output dir")
+	}
+}
+
+func loadPluginFixture(t *testing.T) pluginFixture {
+	t.Helper()
+	path, err := filepath.Abs(filepath.Join(
+		"..", "..", "gorouter", "federation", "testdata", "golden", "supergraph.graphql",
+	))
 	if err != nil {
 		t.Fatal(err)
 	}
-	cleanSDL, err := generator.StripFederationTypes(string(sdlBytes))
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		t.Skip("supergraph fixture not found")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clean, err := generator.StripFederationTypes(string(raw))
 	if err != nil {
 		t.Fatalf("strip: %v", err)
 	}
+	return pluginFixture{rawSDL: string(raw), cleanSDL: clean}
+}
 
-	tmpDir := t.TempDir()
-	queryFile := filepath.Join(tmpDir, "query.graphql")
-	if err2 := os.WriteFile(queryFile, []byte(`
+func writeQueryFile(t *testing.T, dir string) string {
+	t.Helper()
+	const query = `
 query GetProduct($id: ID!) {
   product(id: $id) {
     id
     sku
   }
 }
-`), 0o644); err2 != nil {
-		t.Fatal(err2)
+`
+	path := filepath.Join(dir, "query.graphql")
+	if err := os.WriteFile(path, []byte(query), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	return path
+}
 
-	outFile := filepath.Join(tmpDir, "client.go")
-	clientPkg := gqlgenConfig.PackageConfig{
-		Filename: outFile,
-		Package:  "generated",
-	}
-	generateCfg := &gqlgencConfig.GenerateConfig{}
-
-	// Build the gqlgenc config. Setting SchemaFilename to a non-nil sentinel slice
-	// causes LoadSchema to use loadLocalSchema (which reads GQLConfig.Sources) rather
-	// than attempting remote introspection.
-	gqlCfg := gqlgenConfig.DefaultConfig()
-	gqlCfg.Sources = []*ast.Source{{Name: "supergraph", Input: cleanSDL}}
-
-	gqlgencCfg := &gqlgencConfig.Config{
-		GQLConfig:      gqlCfg,
-		SchemaFilename: gqlgencConfig.StringList{"supergraph"}, // non-nil → loadLocalSchema
-		Query:          []string{queryFile},
-		Client:         clientPkg,
-		Generate:       generateCfg,
-	}
-
-	err = gqlgencGenerator.Generate(
-		context.Background(),
-		gqlgencCfg,
-		api.ReplacePlugin(
-			gqlgencfed.NewWithFilePaths(
-				[]string{queryFile},
-				clientPkg,
-				generateCfg,
-				string(sdlBytes),
-			),
-		),
-	)
+func buildGqlgenConfig(t *testing.T, cleanSDL string) *gqlgenConfig.Config {
+	t.Helper()
+	cfg := gqlgenConfig.DefaultConfig()
+	cfg.Sources = []*ast.Source{{Name: "supergraph", Input: cleanSDL}}
+	schema, err := gqlparser.LoadSchema(cfg.Sources...)
 	if err != nil {
-		t.Fatalf("Generate: %v", err)
+		t.Fatalf("load schema: %v", err)
 	}
+	cfg.Schema = schema
+	if err := cfg.Init(); err != nil {
+		t.Fatalf("init gqlgen config: %v", err)
+	}
+	return cfg
+}
 
-	data, err := os.ReadFile(outFile)
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("read output: %v", err)
+		t.Fatalf("read %s: %v", path, err)
 	}
-	out := string(data)
+	return string(data)
+}
 
-	for _, notWant := range []string{"clientv2", "federationclient"} {
-		if strings.Contains(out, notWant) {
-			t.Errorf("output contains forbidden string %q", notWant)
-		}
-	}
-	for _, want := range []string{
-		"GetProductDocument",
-		"GetProductPlanSpec",
-		"ResolveURLSpec",
-		"ExecuteAndUnmarshal",
-	} {
-		if !strings.Contains(out, want) {
+func assertContains(t *testing.T, body string, wants ...string) {
+	t.Helper()
+	for _, want := range wants {
+		if !strings.Contains(body, want) {
 			t.Errorf("output missing %q", want)
 		}
 	}
+}
 
-	execFile := filepath.Join(tmpDir, "federation_exec.go")
-	if _, err := os.Stat(execFile); os.IsNotExist(err) {
-		t.Errorf("federation_exec.go not written to output dir")
+func assertExcludes(t *testing.T, body string, forbidden ...string) {
+	t.Helper()
+	for _, bad := range forbidden {
+		if strings.Contains(body, bad) {
+			t.Errorf("output contains forbidden string %q", bad)
+		}
 	}
-	t.Logf("plugin-generated output:\n%s", out)
 }
