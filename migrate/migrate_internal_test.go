@@ -139,7 +139,9 @@ func TestRun_ClientGoContent(t *testing.T) {
 	// the per-service smoke tests cover the populated case end-to-end.
 	checks := []string{
 		"package cross_service",
-		"newFederationClient",
+		"func SetServiceDiscovery(",
+		"type defederatorCompatClient struct",
+		"func extractHTTPClient(",
 		"exampleSubgraphURLs",
 		"_subgraphServices",
 		"errors.Wrap",

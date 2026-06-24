@@ -11,6 +11,18 @@
 	{{- end}}
 	{{- end}}
 
+	// OperationPlanSpecs maps each operation name to its PlanSpec JSON, so a caller
+	// can resolve a plan by operation name alone — e.g. a genqlient graphql.Client
+	// adapter dispatching by graphql.Request.OpName, with no query document.
+	// Introspection operations are excluded; they have no PlanSpec.
+	var OperationPlanSpecs = map[string]string{
+		{{- range $model := .Operation}}
+		{{- if not (introspection $model.Name) }}
+		"{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
+		{{- end}}
+		{{- end}}
+	}
+
 	{{- if .ClientInterfaceName }}
         type {{ .ClientInterfaceName }} interface {
             {{- range $model := .Operation }}
@@ -72,13 +84,7 @@
         }
         // Validate all specs against the URL map at construction time so callers
         // catch missing subgraph entries immediately rather than at first call.
-        for opName, specJSON := range map[string]string{
-            {{- range $model := .Operation}}
-            {{- if not (introspection $model.Name) }}
-            "{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
-            {{- end}}
-            {{- end}}
-        } {
+        for opName, specJSON := range OperationPlanSpecs {
             if _, err := Resolve(specJSON, subgraphURLs); err != nil {
                 return nil, fmt.Errorf("federation client: validate plan for %q: %w", opName, err)
             }
@@ -133,13 +139,7 @@
             httpFactory = func(_ context.Context) *http.Client { return http.DefaultClient }
         }
         // Validate all specs parse correctly at construction time.
-        for opName, specJSON := range map[string]string{
-            {{- range $model := .Operation}}
-            {{- if not (introspection $model.Name) }}
-            "{{ $model.Name }}": {{ $model.Name|go }}PlanSpec,
-            {{- end}}
-            {{- end}}
-        } {
+        for opName, specJSON := range OperationPlanSpecs {
             if _, err := ResolveURLSpec(specJSON); err != nil {
                 return nil, fmt.Errorf("federation client: validate plan for %q: %w", opName, err)
             }

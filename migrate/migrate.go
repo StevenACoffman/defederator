@@ -216,19 +216,25 @@ func printNextSteps(abs string) {
 	_, _ = fmt.Fprintf(os.Stdout, "  2. Run: defederator --dir %s\n", abs)
 	_, _ = fmt.Fprintf(
 		os.Stdout,
-		"  3. Update cross_service call sites to use the new FederationClient.\n",
+		"  3. Swap cross_service call sites: genqlient.X(ctx, ctx.GraphQL().AsXxx(), …)\n"+
+			"     → genqlient.X(ctx, New{Admin,User}GraphQLClient(ctx), …). Keep the\n"+
+			"     genqlient functions and response types; only the client arg changes.\n",
 	)
-	_, _ = fmt.Fprintf(os.Stdout, "  4. %s\n", LintFixHint())
+	_, _ = fmt.Fprintf(
+		os.Stdout,
+		"  4. Wire service discovery once in cmd/serve: cross_service.SetServiceDiscovery(sd).\n",
+	)
+	_, _ = fmt.Fprintf(os.Stdout, "  5. %s\n", LintFixHint())
 }
 
 // LintFixHint returns the single-line suggestion printed after a successful
-// migrate run. After recompilation, the webapp kacontextinterface analyzer
-// (ADR-429) commonly flags ctx interfaces that now transitively reference
-// service_discovery.KAContext. The analyzer emits SuggestedFix records that
-// golangci-lint applies in place when invoked with --fix, so the user can
-// resolve the whole batch with one command rather than hand-editing each site.
+// migrate run. With the process-level service-discovery handle (SetServiceDiscovery),
+// the call-site swap adds no new ctx requirement, so the ADR-429 cascade does not
+// occur; this hint is a fallback for any pre-existing ka-context-interface debt a
+// recompile surfaces. The analyzer emits SuggestedFix records that golangci-lint
+// applies in place with --fix, resolving the batch in one command.
 func LintFixHint() string {
-	return "Apply ka-context-interface fixes: tools/runlint.sh --fix <changed-files-or-packages>"
+	return "If a recompile surfaces ka-context-interface debt: tools/runlint.sh --fix <changed-files-or-packages>"
 }
 
 // writeFile writes data to path, respecting DryRun and Force options.

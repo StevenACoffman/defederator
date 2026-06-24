@@ -4,146 +4,189 @@ package {{.PackageName}}
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/url"
+	"reflect"
+	"testing"
+	"unsafe"
 
 	"github.com/Khan/genqlient/graphql"
-	"github.com/Khan/webapp/pkg/lib/defederatorcompat"
 	"github.com/Khan/webapp/pkg/lib/errors"
-	"github.com/Khan/webapp/pkg/lib/httpctx"
 	"github.com/Khan/webapp/pkg/lib/service_discovery"
-	"github.com/Khan/webapp/pkg/web"
 	"github.com/Khan/webapp/pkg/web/gqlclient"
 	{{.ImportAlias}} "{{.DefedImportPath}}"
 )
 
-// federationCtx is the minimal context the per-request federation client needs:
-// HTTP transport from the request context and service discovery for subgraph URL
-// resolution. Use newFederationClient for handlers that propagate the caller's
-// auth via the incoming HTTP transport. The test-compat path inside
-// newFederationClient checks for gqlclient.KAContext at runtime — callers that
-// happen to also satisfy gqlclient.KAContext (i.e. the full webapp ktx in
-// tests) opt in via defederatorcompat.WithMode; callers without it (CLI tools,
-// narrower contexts) fall through unaffected to the federation HTTP path.
-type federationCtx interface {
-	context.Context
-	web.ServiceVersionContext
-	httpctx.KAContext
-	service_discovery.KAContext
-}
+// serviceDiscovery is the process-level service-discovery client used to resolve
+// subgraph endpoints. It is set once at startup via SetServiceDiscovery. Holding
+// it here — rather than requiring service_discovery.KAContext on every caller's
+// ctx — keeps the cross-service call signatures unchanged and avoids an ADR-429
+// interface cascade through the whole service.
+var serviceDiscovery service_discovery.Client
 
-// newFederationClient returns a FederationClient whose HTTP transport and subgraph
-// URLs are resolved fresh from ctx on every operation call. In tests where the
-// suite has called defederatorcompat.WithMode(ctx), per-operation calls dispatch
-// through the gqlclient mock using the composed federated query — keeping existing
-// gqlclient.Mux-based mocks working unchanged after migration from genqlient.
-func newFederationClient(ctx federationCtx) {{.ImportAlias}}.FederationClient {
-	return {{.ImportAlias}}.NewClientWithFactories(
-		func(callCtx context.Context) *http.Client {
-			if h, ok := callCtx.(httpctx.KAContext); ok {
-				return h.HTTP()
-			}
-			return http.DefaultClient
-		},
-		func(callCtx context.Context, specJSON string) (*{{.ImportAlias}}.Plan, error) {
-			urls, err := {{.URLFuncName}}(callCtx, ctx.ServiceDiscovery())
-			if err != nil {
-				return nil, err
-			}
-			return {{.ImportAlias}}.Resolve(specJSON, urls)
-		},
-		{{.ImportAlias}}.WithGQLClientFor(func(callCtx context.Context) graphql.Client {
-			// Return nil unless the test harness has opted in. Production never
-			// sets the mode signal, so this branch is a no-op in prod.
-			if !defederatorcompat.IsMode(callCtx) {
-				return nil
-			}
-			if gc, ok := callCtx.(gqlclient.KAContext); ok {
-				return gc.GraphQL().AsServiceAdmin()
-			}
-			return nil
-		}),
-	)
-}
-
-{{- if .AuthFlavors.Multi}}
-
-// jobsCtx is the minimal context for service-admin / background and per-user
-// federation calls that pick an HTTP transport explicitly via gqlclient: GraphQL
-// (for HTTP-client selection) plus service discovery (for subgraph URL
-// resolution). Use the per-flavor constructors below in background jobs and
-// admin RPCs where the caller's identity doesn't ride on the request.
-type jobsCtx interface {
-	context.Context
-	gqlclient.KAContext
-	service_discovery.KAContext
-}
-
+// SetServiceDiscovery wires the process-level service-discovery client used to
+// resolve subgraph endpoints. Call it once from the service's cmd/serve setup,
+// before any cross-service call is issued.
+func SetServiceDiscovery(sd service_discovery.Client) { serviceDiscovery = sd }
 {{- if .AuthFlavors.User}}
 
-// NewUserFederationClient returns a FederationClient authenticated as the
-// request user. Use for operations previously calling AsUser().
-func NewUserFederationClient(ctx jobsCtx) {{.ImportAlias}}.FederationClient {
-	return newJobFederationClient(
-		ctx.GraphQL().AsUser().HTTPClient(),
-		ctx.ServiceDiscovery(),
-	)
+// NewUserGraphQLClient returns a genqlient graphql.Client that routes each
+// cross-service operation directly to its owning subgraph(s), authenticated as
+// the request user. It is a drop-in replacement for ctx.GraphQL().AsUser() in
+// genqlient.<Op>(ctx, client, …) calls: the genqlient operation functions and
+// their response types stay unchanged; only the transport differs (no gateway
+// hop).
+func NewUserGraphQLClient(ctx gqlclient.KAContext) graphql.Client {
+	return newCompatClient(ctx.GraphQL().AsUser())
 }
 {{- end}}
-
 {{- if .AuthFlavors.Admin}}
 
-// NewAdminFederationClient returns a FederationClient authenticated as
-// service-admin. Use for operations previously calling AsServiceAdmin().
-func NewAdminFederationClient(ctx jobsCtx) {{.ImportAlias}}.FederationClient {
-	return newJobFederationClient(
-		ctx.GraphQL().AsServiceAdmin().HTTPClient(),
-		ctx.ServiceDiscovery(),
-	)
+// NewAdminGraphQLClient is like NewUserGraphQLClient but authenticated as
+// service-admin — the common case for cross-service calls.
+func NewAdminGraphQLClient(ctx gqlclient.KAContext) graphql.Client {
+	return newCompatClient(ctx.GraphQL().AsServiceAdmin())
 }
 {{- end}}
-
 {{- if .AuthFlavors.LocaleUser}}
 
-// newLocaleUserFederationClient returns a FederationClient with an explicit
-// KALocale header. Use for operations previously calling
-// WithKALocale(l).AsUser().
-func newLocaleUserFederationClient(ctx jobsCtx, kaLocale string) {{.ImportAlias}}.FederationClient {
-	return newJobFederationClient(
-		ctx.GraphQL().WithKALocale(kaLocale).AsUser().HTTPClient(),
-		ctx.ServiceDiscovery(),
-	)
+// NewLocaleUserGraphQLClient is like NewUserGraphQLClient with an explicit
+// KALocale header. Use for operations previously calling WithKALocale(l).AsUser().
+func NewLocaleUserGraphQLClient(ctx gqlclient.KAContext, kaLocale string) graphql.Client {
+	return newCompatClient(ctx.GraphQL().WithKALocale(kaLocale).AsUser())
 }
 {{- end}}
 
-// newJobFederationClient builds a FederationClient from an already-chosen
-// *http.Client and a service-discovery client, resolving subgraph URLs on
-// every call. All the per-auth-mode constructors funnel through here.
-// The WithGQLClientFor option mirrors newFederationClient: in tests opted in
-// via defederatorcompat.WithMode, dispatch through the gqlclient mock so
-// existing Mux-based mocks keep working after migration. No-op in production.
-func newJobFederationClient(httpClient *http.Client, sd service_discovery.Client) {{.ImportAlias}}.FederationClient {
-	return {{.ImportAlias}}.NewClientWithFactories(
-		func(_ context.Context) *http.Client { return httpClient },
-		func(callCtx context.Context, specJSON string) (*{{.ImportAlias}}.Plan, error) {
-			urls, err := {{.URLFuncName}}(callCtx, sd)
-			if err != nil {
-				return nil, err
-			}
-			return {{.ImportAlias}}.Resolve(specJSON, urls)
-		},
-		{{.ImportAlias}}.WithGQLClientFor(func(callCtx context.Context) graphql.Client {
-			if !defederatorcompat.IsMode(callCtx) {
-				return nil
-			}
-			if gc, ok := callCtx.(gqlclient.KAContext); ok {
-				return gc.GraphQL().AsServiceAdmin()
-			}
-			return nil
-		}),
-	)
+// newCompatClient builds the drop-in graphql.Client. Under `go test` it returns
+// gc unchanged so the operation dispatches through gc.MakeRequest — gqlclient.Mux
+// mocks match by operation name, and gqltest in-process federated servers serve
+// the composed query. In production it returns a defederatorCompatClient that
+// plans direct-to-subgraph using gc's auth-bound transport.
+//
+// The gate is testing.Testing(), not "extractHTTPClient failed": gqltest clients
+// expose an httpClient, so extraction alone cannot tell a test client from a
+// production one.
+func newCompatClient(gc graphql.Client) graphql.Client {
+	if testing.Testing() {
+		return gc
+	}
+	httpClient, ok := extractHTTPClient(gc)
+	if !ok {
+		return gc
+	}
+	return &defederatorCompatClient{httpClient: httpClient}
 }
-{{- end}}
+
+// defederatorCompatClient implements genqlient's graphql.Client by routing each
+// operation through the generated defederator planner instead of the federation
+// gateway: it looks the operation's PlanSpec up by name, resolves subgraph URLs
+// via the process service-discovery handle, and executes direct-to-subgraph —
+// letting callers keep every genqlient-generated function and response type
+// unchanged while bypassing the gateway.
+type defederatorCompatClient struct {
+	httpClient *http.Client
+}
+
+func (c *defederatorCompatClient) MakeRequest(
+	ctx context.Context,
+	req *graphql.Request,
+	resp *graphql.Response,
+) error {
+	if serviceDiscovery == nil {
+		return errors.Wrap(errors.Internal(),
+			"internal_message",
+			"service discovery not configured; call {{.PackageName}}.SetServiceDiscovery in cmd/serve",
+			"op_name", req.OpName)
+	}
+	spec, ok := {{.ImportAlias}}.OperationPlanSpecs[req.OpName]
+	if !ok {
+		return errors.Wrap(errors.Internal(),
+			"internal_message", "no defederator plan for operation",
+			"op_name", req.OpName)
+	}
+	urls, err := {{.URLFuncName}}(ctx, serviceDiscovery)
+	if err != nil {
+		return errors.Wrap(err)
+	}
+	plan, err := {{.ImportAlias}}.Resolve(spec, urls)
+	if err != nil {
+		return errors.Wrap(err)
+	}
+	// Normalize genqlient's typed Variables struct to map[string]any so the
+	// planner can subset variables per subgraph fetch — filterVars only filters
+	// maps; a struct would be sent whole to every fetch.
+	var vars map[string]any
+	if req.Variables != nil {
+		raw, marshalErr := json.Marshal(req.Variables)
+		if marshalErr != nil {
+			return errors.Wrap(marshalErr)
+		}
+		if unmarshalErr := json.Unmarshal(raw, &vars); unmarshalErr != nil {
+			return errors.Wrap(unmarshalErr)
+		}
+	}
+	// genqlient pre-sets resp.Data to a typed pointer; decode straight into it so
+	// json.Unmarshal drops planner-added fields (a typed dest skips projection).
+	dest := any(&resp.Data)
+	if resp.Data != nil {
+		dest = resp.Data
+	}
+	if err := {{.ImportAlias}}.ExecuteAndUnmarshal(ctx, plan, vars, c.httpClient, dest); err != nil {
+		return errors.Wrap(err)
+	}
+	return nil
+}
+
+// httpClientExposer is a forward-compat hook: when gqlclient grows an
+// HTTPClient() *http.Client accessor, extractHTTPClient picks it up via this
+// assertion and the reflection fallback below becomes dead code to remove.
+type httpClientExposer interface {
+	HTTPClient() *http.Client
+}
+
+// extractHTTPClient returns the auth-bound *http.Client for gc: a structural
+// HTTPClient() accessor if present, otherwise a reflection fallback that reads
+// the unexported httpClient field on gqlclient's *_clientAdapter. It returns
+// (nil, false) for test mocks (gqlclient.Mux has no such field) and for any other
+// shape; callers treat that as "no direct-to-subgraph path", which is correct.
+func extractHTTPClient(gc graphql.Client) (*http.Client, bool) {
+	if h, ok := gc.(httpClientExposer); ok {
+		return h.HTTPClient(), true
+	}
+	return extractHTTPClientViaReflection(gc)
+}
+
+// extractHTTPClientViaReflection is the unsafe.Pointer fallback path of
+// extractHTTPClient: it reaches the unexported httpClient field on the concrete
+// gqlclient adapter. Localized here so the unsafe import has a single use site
+// and the type-assertion fast path stays grep-able. Remove once gqlclient grows
+// an HTTPClient() accessor.
+func extractHTTPClientViaReflection(gc graphql.Client) (*http.Client, bool) {
+	v := reflect.ValueOf(gc)
+	if !v.IsValid() {
+		return nil, false
+	}
+	if v.Kind() == reflect.Pointer {
+		if v.IsNil() {
+			return nil, false
+		}
+		v = v.Elem()
+	}
+	if v.Kind() != reflect.Struct {
+		return nil, false
+	}
+	f := v.FieldByName("httpClient")
+	if !f.IsValid() || !f.CanAddr() {
+		return nil, false
+	}
+	rf := reflect.NewAt(f.Type(), unsafe.Pointer(f.UnsafeAddr())).Elem()
+	httpClient, ok := rf.Interface().(*http.Client)
+	if !ok {
+		return nil, false
+	}
+	return httpClient, true
+}
 
 // _subgraphServices maps join__Graph enum names to service-discovery names.
 // Pruned at migration time to the set of subgraphs this service's operations
@@ -154,8 +197,8 @@ var _subgraphServices = map[string]string{
 {{- end}}
 }
 
-// {{.URLFuncName}} builds the enum-name → HTTP-endpoint map by calling
-// service discovery for each subgraph this service's operations touch.
+// {{.URLFuncName}} builds the enum-name → HTTP-endpoint map by calling service
+// discovery for each subgraph this service's operations touch.
 func {{.URLFuncName}}(ctx context.Context, sd service_discovery.Client) (map[string]string, error) {
 	urls := make(map[string]string, len(_subgraphServices))
 	for enumName, svcName := range _subgraphServices {

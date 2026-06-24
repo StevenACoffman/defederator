@@ -20,6 +20,7 @@ var testData = &Data{
 	DefedImportPath: "github.com/Khan/webapp/services/example/generated/defederator",
 	URLFuncName:     "exampleSubgraphURLs",
 	Subgraphs:       testSubgraphs,
+	AuthFlavors:     AuthFlavors{User: true, Admin: true},
 }
 
 func TestRender_ContainsExpected(t *testing.T) {
@@ -30,10 +31,22 @@ func TestRender_ContainsExpected(t *testing.T) {
 	checks := []string{
 		"package cross_service",
 		`defed "github.com/Khan/webapp/services/example/generated/defederator"`,
-		"federationCtx",
-		"func newFederationClient(",
-		"defed.NewClientWithFactories(",
-		"defed.Resolve(specJSON, urls)",
+		`"github.com/Khan/genqlient/graphql"`,
+		// B2: process-level service-discovery handle, no ctx cascade.
+		"var serviceDiscovery service_discovery.Client",
+		"func SetServiceDiscovery(sd service_discovery.Client)",
+		// Per-flavor drop-in graphql.Client constructors (compat route).
+		"func NewUserGraphQLClient(ctx gqlclient.KAContext) graphql.Client",
+		"func NewAdminGraphQLClient(ctx gqlclient.KAContext) graphql.Client",
+		// The adapter dispatches by op name through the generated planner.
+		"type defederatorCompatClient struct",
+		"defed.OperationPlanSpecs[req.OpName]",
+		"defed.Resolve(spec, urls)",
+		"defed.ExecuteAndUnmarshal(",
+		// Test gate + transport extraction.
+		"if testing.Testing() {",
+		"func extractHTTPClient(",
+		// Service-discovery URL resolution.
 		"exampleSubgraphURLs",
 		`"CONTENT": "content"`,
 		`"USERS": "users"`,
@@ -42,52 +55,55 @@ func TestRender_ContainsExpected(t *testing.T) {
 		`(&url.URL{`,
 		`Path:   "/backend-graphql/"`,
 		"DO NOT EDIT",
-		// Test-compat wiring: newFederationClient pulls graphql.Client out
-		// of ctx at runtime via a type assertion (gqlclient.KAContext
-		// is not required by federationCtx itself, so narrow CLI/script
-		// contexts still satisfy it).
-		`"github.com/Khan/webapp/pkg/lib/defederatorcompat"`,
-		`"github.com/Khan/genqlient/graphql"`,
-		"defed.WithGQLClientFor(",
-		"defederatorcompat.IsMode(callCtx)",
-		"callCtx.(gqlclient.KAContext)",
-		"gc.GraphQL().AsServiceAdmin()",
 	}
 	for _, want := range checks {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered output missing %q", want)
 		}
 	}
+	// The compat route keeps genqlient types and must not pull in the removed
+	// pkg/lib/defederatorcompat helper or the typed FederationClient wiring.
+	for _, unwanted := range []string{
+		"defederatorcompat",
+		"NewClientWithFactories",
+		"FederationClient",
+		"federationCtx",
+	} {
+		if strings.Contains(got, unwanted) {
+			t.Errorf(
+				"rendered output should not contain %q (typed-route leftover)",
+				unwanted,
+			)
+		}
+	}
 }
 
-func TestRender_MultiAuthContainsJobClientTestCompat(t *testing.T) {
-	// In the multi-flavor case, hand-written wrappers funnel through
-	// newJobFederationClient (not newFederationClient). Verify the test-compat
-	// option also wires through that constructor — otherwise tests calling
-	// e.g. NewAdminFederationClient bypass the gqlclient mock entirely.
-	d := *testData
-	d.AuthFlavors = AuthFlavors{User: true, Admin: true}
-	got, err := Render(&d)
+func TestRender_PerFlavorConstructors(t *testing.T) {
+	// Only the detected flavors emit a constructor.
+	adminOnly := *testData
+	adminOnly.AuthFlavors = AuthFlavors{Admin: true}
+	got, err := Render(&adminOnly)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(got, "func newJobFederationClient(") {
-		t.Fatalf("multi-auth output is missing newJobFederationClient")
+	if !strings.Contains(got, "func NewAdminGraphQLClient(") {
+		t.Errorf("admin-only output is missing NewAdminGraphQLClient")
 	}
-	// Slice out the body of newJobFederationClient so we only check its option list.
-	jobStart := strings.Index(got, "func newJobFederationClient(")
-	if jobStart < 0 {
-		t.Fatalf("could not locate newJobFederationClient start")
+	if strings.Contains(got, "func NewUserGraphQLClient(") {
+		t.Errorf("admin-only output should not emit NewUserGraphQLClient")
 	}
-	jobBody := got[jobStart:]
-	for _, want := range []string{
-		"defed.WithGQLClientFor(",
-		"defederatorcompat.IsMode(callCtx)",
-		"gc.GraphQL().AsServiceAdmin()",
-	} {
-		if !strings.Contains(jobBody, want) {
-			t.Errorf("newJobFederationClient body is missing %q", want)
-		}
+	if strings.Contains(got, "func NewLocaleUserGraphQLClient(") {
+		t.Errorf("admin-only output should not emit NewLocaleUserGraphQLClient")
+	}
+
+	locale := *testData
+	locale.AuthFlavors = AuthFlavors{LocaleUser: true}
+	got, err = Render(&locale)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "func NewLocaleUserGraphQLClient(") {
+		t.Errorf("locale-user output is missing NewLocaleUserGraphQLClient")
 	}
 }
 

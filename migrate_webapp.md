@@ -19,6 +19,141 @@ defederator migrate --help
 
 The supergraph SDL is at `~/khan/webapp/gengraphql/composed_schema.graphql`. The `migrate` subcommand reads it automatically when it finds `genqlient.yaml` in the service directory.
 
+## Design constraints (validated end-to-end on `services/districts`)
+
+Four properties must hold for a service migration. All four were verified on
+districts (24 `cross_service` files, full build + `go test ./services/districts/...`
+green, `ka-context-interface` lint clean). They refine the "What migrate does"
+description below and supersede it where they differ.
+
+### 1. `defederator migrate` writes only inside the target service directory
+
+For `defederator migrate --force "$WEBAPP/services/<svc>"`, every file written or
+rewritten is under `services/<svc>/`:
+
+- `services/<svc>/.defederator.yml`
+- `services/<svc>/cross_service/client.go` — the adapter, the per-flavor
+  constructors, the op→PlanSpec map, the process-level service-discovery handle,
+  `extractHTTPClient`, and `<svc>SubgraphURLs`
+- `services/<svc>/cross_service/*.go` — the call-site rewrites
+- `services/<svc>/generated/defederator/{client.go,federation_exec.go}`
+
+It must **not** touch `pkg/`, other `services/*`, `gengraphql/`, or
+`generated/genqlient/`. The supergraph SDL is read-only input. The single change
+migrate cannot write for you — registering the service-discovery handle (§3) — is
+one line the human adds to the service's own `cmd/serve`, still inside
+`services/<svc>/`. No part of the migration edits code in another package.
+
+### 2. Use the compat adapter, not the typed `FederationClient`
+
+Rewrite each call to **swap only the `graphql.Client` argument**, keeping the
+`genqlient.<Op>(...)` function and its response types:
+
+```go
+genqlient.<Op>(ctx, ctx.GraphQL().AsServiceAdmin(), …)
+→ genqlient.<Op>(ctx, NewAdminGraphQLClient(ctx), …)
+```
+
+`New<Flavor>GraphQLClient` returns a `graphql.Client` backed by the generated
+`defed` planner (the `graphqlcompat` idea, templated into the package so it needs
+no `gorouter` dependency). Because genqlient's generated functions and **response
+structs are unchanged**, this avoids:
+
+- the **response-object-type cascade**: the typed `FederationClient` returns
+  `defederator`-package response structs (independent of genqlient's, differently
+  named, pointer-sliced). Districts surfaced **111** genqlient response-type
+  aliases through `rostering`/`resolvers`; the compat swap changes **none** of
+  them, whereas the typed route would force edits across all of them.
+- addendum categories **3d, 3e, 5a–5d** — all artifacts of callers seeing
+  defederator's typed enums/pointers/scalars. With genqlient types preserved, they
+  do not arise.
+
+Three adapter details the template must bake in (each learned the hard way on
+districts):
+
+- **Export an op→PlanSpec map.** The generated `defed` package builds
+  `opName → PlanSpec` only function-locally inside `NewClientWithHTTPFactory`, and
+  `DocumentOperationNames` maps the other direction. Emit a package-level
+  `var operationPlanSpecs = map[string]string{ "<Svc>_<Op>": defed.<Svc><Op>PlanSpec, … }`
+  so the adapter's `MakeRequest` can look a plan up by `req.OpName`.
+- **Normalize `req.Variables`.** genqlient passes a typed struct, but the planner's
+  `filterVars` only subsets a `map[string]any` — a struct is sent whole to every
+  subgraph fetch. JSON round-trip it into a map first.
+- **Gate test/prod on `testing.Testing()`**, not on `extractHTTPClient` failing.
+  gqltest / servicetest in-process clients expose an `httpClient`, so the
+  extraction heuristic misfires; under test, return the supplied client so
+  `gqlclient.Mux` mocks and in-process federated servers keep working (this is what
+  preserves the §8 mock-dispatch behavior).
+
+### 3. Source service discovery in-process (B2) — no `ctx` cascade
+
+The adapter needs a `service_discovery.Client` to resolve subgraph URLs. Do **not**
+take it from `ctx.ServiceDiscovery()`: that puts `service_discovery.KAContext` on
+every constructor's `ctx`, which ADR-429 then forces onto every transitive caller
+— the ~140-site cascade described in addendum §6. Service discovery is
+process/environment-scoped (subgraphs resolve at the default version), so hold it
+in a package-level handle set once at startup:
+
+```go
+// cross_service/client.go
+var serviceDiscovery service_discovery.Client
+
+// SetServiceDiscovery wires the process-level service-discovery client used to
+// resolve subgraph endpoints. Call once from the service's cmd/serve setup.
+func SetServiceDiscovery(sd service_discovery.Client) { serviceDiscovery = sd }
+```
+
+The adapter resolves URLs with `serviceDiscovery` plus the request's plain
+`context.Context` (which `MakeRequest` already receives). Consequences:
+
+- **No caller changes.** Constructors require only `gqlclient.KAContext` (to reach
+  `ctx.GraphQL().As…()` for the auth-bound transport) — the interface those
+  wrappers already had. The ADR-429 §6 cascade does **not** occur, so the migration
+  stays confined to `cross_service/` plus the one `cmd/serve` registration line.
+- migrate emits `SetServiceDiscovery`; the human adds one
+  `cross_service.SetServiceDiscovery(sd)` call in `cmd/serve` (in-service), where
+  the service-discovery client is already available among the startup
+  dependencies. A first-use guard (panic if unset in prod) catches a forgotten
+  wiring.
+
+Trade-off: a package-level handle instead of pure ADR-429 ctx-threading, chosen to
+keep the migration package-local and cascade-free. The cleaner alternative — a
+`ServiceDiscovery()` accessor on the `pkg/web/gqlclient` adapter (parallel to the
+`HTTPClient()` accessor the `extractHTTPClient` reflection hack already
+anticipates) — would be even tidier but is an out-of-service `pkg/` change, so it
+is deliberately out of scope here.
+
+### 4. The generated + rewritten output passes webapp lint
+
+Lint-clean under webapp's custom linters when the template observes:
+
+- **`generated/` is path-excluded.** `.golangci.yml` excludes `generated($|/)`
+  (`generated: lax`), so `generated/defederator/{client.go,federation_exec.go}` are
+  not linted — their internal `fmt.Errorf`/stdlib-`errors` use is fine. Keep those
+  files under `generated/`.
+- **Hand-maintained `cross_service/*.go` must be clean.** The emitted
+  `client.go` (and the rewritten wrappers) use `pkg/lib/errors`
+  (`errors.Wrap`/`errors.Internal`), never `fmt.Errorf` or stdlib `errors`; no
+  `time.Now`, no `sync.WaitGroup` (`ka-banned-symbol`/`depguard`).
+- **`ka-visibility`** — no leading-underscore identifier referenced from another
+  file in the package. The op→PlanSpec map, the service-discovery handle, and any
+  context-interface helper must be plain lowercase (`operationPlanSpecs`, not
+  `_operationPlanSpecs`). This is the same rule as addendum 3c/7 — emit no
+  `_`-prefixed cross-file names.
+- **`ka-context-interface` (ADR-429)** — with B2 there is **no** new
+  `service_discovery` requirement, so the migration introduces no new violations
+  and no cascade. (Any debt a recompile surfaces in callers is pre-existing, not
+  created here — contrast addendum §6, which describes the cascade you get only if
+  you ignore §3 and source service discovery from `ctx`.)
+- **`ka-genqlient` (§4a)** — keep `var _ = genqlient.<Op>_Operation` (or the call)
+  for every retained `# @genqlient` block so the operation still registers as used.
+- **`ka-graphql-task` (§4b)** — leave `tasks.GraphQLTask(...)` sites untouched;
+  they must keep passing `genqlient.<Op>_Operation`, not a defederator `Document`.
+
+Verify per service: `go build ./services/<svc>/...`, `go test ./services/<svc>/...`,
+a cache-cleared `tools/runlint.sh services/<svc>/cross_service/*.go`, and
+`defederator check services/<svc>`.
+
 ## What migrate does
 
 For each service directory it:
@@ -59,6 +194,26 @@ cross-service Go files. Specifically:
 
 You should still review the generated files before committing, but no manual
 edits are required for the cases above.
+
+### Not yet automated (gap vs. the Design constraints)
+
+Today `migrate` generates the config + scaffold + typed client; reaching the
+Design-constraints end state (compat adapter, no cascade, package-local) still
+needs these steps, which the tool should grow to perform (all confined to
+`services/<svc>/`):
+
+1. **Emit the compat adapter + `operationPlanSpecs` map** in `cross_service/client.go`
+   (§2) instead of, or alongside, the typed `newFederationClient` — and a
+   `New<Flavor>GraphQLClient` returning `graphql.Client` per detected flavor.
+2. **Rewrite the call sites** — swap `ctx.GraphQL()[.WithService(…)].As<Flavor>()`
+   for `New<Flavor>GraphQLClient(ctx)`, drop `WithService`, leave task-dispatch
+   calls alone. (migrate already parses these files for flavor detection, so it
+   has the AST it needs.)
+3. **Emit the B2 handle** — `var serviceDiscovery` + `SetServiceDiscovery` (§3);
+   the human adds the one `SetServiceDiscovery(sd)` call in `cmd/serve`.
+
+Until then those three are the manual follow-up after `defederator migrate`; the
+districts reference implementation shows the target output.
 
 ## defederator code generation (only with `--no-generate`)
 
@@ -101,6 +256,15 @@ func NewAdminFederationClient(ctx _adminCtx) defed.FederationClient { ... }
 func newLocaleUserFederationClient(ctx _localeCtx) defed.FederationClient { ... }
 func newJobFederationClient(httpClient *http.Client, sd service_discovery.Client) defed.FederationClient { ... }
 ```
+
+> **Superseded by the Design constraints.** This historical snippet uses the typed
+> `defed.FederationClient` route (the response-object-type cascade, §2) and
+> `_`-prefixed context types (which `ka-visibility` rejects across files —
+> addendum 3c/7). Prefer the compat constructors returning `graphql.Client` and
+> taking only `gqlclient.KAContext` (`NewUserGraphQLClient` /
+> `NewAdminGraphQLClient` / a locale variant), with service discovery sourced
+> in-process (§3). Keep one constructor per detected auth flavor; no underscore
+> names.
 
 ### assessments
 
@@ -168,7 +332,14 @@ defederator migrate "$WEBAPP/services/discussions"
 defederator migrate "$WEBAPP/services/districts"
 ```
 
-Post-migration: districts uses a job-context pattern similar to ai-guide. The generated single-constructor `newFederationClient` is correct for the common case; add a `newJobFederationClient(httpClient *http.Client, sd service_discovery.Client)` variant if districts issues federation calls from background jobs that don't have a per-request context.
+Districts is the **reference implementation** of the Design-constraints approach
+(compat adapter + B2 service discovery). All 24 in-scope `cross_service` files were
+migrated by swapping the `graphql.Client` (`New{Admin,User}GraphQLClient`),
+keeping every genqlient function/response type; task-dispatch wrappers
+(`districts.go`, `recompute_roles.go`) were left untouched. Build, `go test
+./services/districts/...`, and `ka-context-interface` lint are all green, and —
+because service discovery comes from the in-process handle (§3) — no caller
+outside `cross_service/` changed. Use it as the template for the next service.
 
 ### donations
 
@@ -521,6 +692,16 @@ When defederator started emitting typed enum / typed pointer fields where the ge
 ### 6. Pre-existing webapp lint debt revealed by recompilation
 
 Stricter recompilation of every cross-service caller surfaces `ka-context-interface` (ADR-429) violations — functions whose `ctx interface { … }` declaration doesn't list every transitively-used KAContext. These are not bugs in defederator; they're tech debt the package previously hid because nothing forced rebuilds at the touched call sites.
+
+> **Avoidable — and avoided by the recommended design.** This cascade only happens
+> when the adapter sources service discovery from `ctx.ServiceDiscovery()`, which
+> adds `service_discovery.KAContext` to the constructors and forces it onto every
+> transitive caller. With the in-process service-discovery handle (Design
+> constraints §3 / "B2"), the constructors require only `gqlclient.KAContext` — the
+> interface the wrappers already had — so the recompile adds **no** new requirement
+> and the migration touches no callers. The ~140-site figure below is the cost of
+> the `ctx`-sourced ("B3") variant; prefer §3 to skip it entirely. The auto-fix
+> path below still applies to any genuinely pre-existing debt the rebuild exposes.
 
 **Auto-fix:** the `kacontextinterface` analyzer (`pkg/kacontext/linters/fix_interface_lint.go`) emits `analysis.SuggestedFix` records covering both the missing embed and the missing import. Run:
 
