@@ -39,6 +39,16 @@ const fixtureGoMod = `module github.com/Khan/webapp
 go 1.22
 `
 
+// crossServiceCaller is a representative cross_service wrapper: it makes a
+// synchronous genqlient call through ctx.GraphQL().AsServiceAdmin(), which the
+// --rewrite pass should swap for NewAdminGraphQLClient(ctx).
+const crossServiceCaller = `package cross_service
+
+func Caller(ctx gqlCtx) {
+	_, _ = genqlient.Example_Op(ctx, ctx.GraphQL().AsServiceAdmin(), 1)
+}
+`
+
 // setupFixtureDir creates a temporary service directory with:
 //   - genqlient.yaml
 //   - go.mod two levels up (simulating webapp root)
@@ -177,6 +187,83 @@ func TestRun_NoForce_SkipsExisting(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(dir, ".defederator.yml"))
 	if !bytes.Equal(data, sentinel) {
 		t.Error("existing .defederator.yml was overwritten without --force")
+	}
+}
+
+func TestRun_RewriteCallSites(t *testing.T) {
+	dir := setupFixtureDir(t)
+	csDir := filepath.Join(dir, "cross_service")
+
+	caller := filepath.Join(csDir, "caller.go")
+	if err := os.WriteFile(caller, []byte(crossServiceCaller), 0o644); err != nil {
+		t.Fatalf("write caller.go: %v", err)
+	}
+	// A *_test.go file must be left untouched by the rewriter.
+	callerTest := filepath.Join(csDir, "caller_test.go")
+	if err := os.WriteFile(callerTest, []byte(crossServiceCaller), 0o644); err != nil {
+		t.Fatalf("write caller_test.go: %v", err)
+	}
+
+	opts := Options{Force: true, RewriteCallSites: true}
+	if err := Run(context.Background(), dir, opts); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got, err := os.ReadFile(caller)
+	if err != nil {
+		t.Fatalf("read caller.go: %v", err)
+	}
+	if !strings.Contains(string(got), "NewAdminGraphQLClient(ctx)") {
+		t.Errorf("caller.go was not rewritten:\n%s", got)
+	}
+	if strings.Contains(string(got), "ctx.GraphQL().AsServiceAdmin()") {
+		t.Errorf("caller.go still contains the old call site:\n%s", got)
+	}
+
+	testGot, err := os.ReadFile(callerTest)
+	if err != nil {
+		t.Fatalf("read caller_test.go: %v", err)
+	}
+	if !bytes.Equal(testGot, []byte(crossServiceCaller)) {
+		t.Errorf("caller_test.go should not be rewritten:\n%s", testGot)
+	}
+}
+
+func TestRun_NoRewrite_LeavesCallSites(t *testing.T) {
+	dir := setupFixtureDir(t)
+	caller := filepath.Join(dir, "cross_service", "caller.go")
+	if err := os.WriteFile(caller, []byte(crossServiceCaller), 0o644); err != nil {
+		t.Fatalf("write caller.go: %v", err)
+	}
+	// Without RewriteCallSites, the call site must be left exactly as-is.
+	if err := Run(context.Background(), dir, Options{Force: true}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	got, err := os.ReadFile(caller)
+	if err != nil {
+		t.Fatalf("read caller.go: %v", err)
+	}
+	if !bytes.Equal(got, []byte(crossServiceCaller)) {
+		t.Errorf("caller.go was modified without --rewrite:\n%s", got)
+	}
+}
+
+func TestRun_RewriteDryRun_WritesNothing(t *testing.T) {
+	dir := setupFixtureDir(t)
+	caller := filepath.Join(dir, "cross_service", "caller.go")
+	if err := os.WriteFile(caller, []byte(crossServiceCaller), 0o644); err != nil {
+		t.Fatalf("write caller.go: %v", err)
+	}
+	opts := Options{DryRun: true, RewriteCallSites: true}
+	if err := Run(context.Background(), dir, opts); err != nil {
+		t.Fatalf("Run dry-run: %v", err)
+	}
+	got, err := os.ReadFile(caller)
+	if err != nil {
+		t.Fatalf("read caller.go: %v", err)
+	}
+	if !bytes.Equal(got, []byte(crossServiceCaller)) {
+		t.Errorf("dry-run --rewrite modified caller.go:\n%s", got)
 	}
 }
 

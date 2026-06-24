@@ -20,6 +20,11 @@ import (
 type Options struct {
 	Force  bool // overwrite existing .defederator.yml and client.go
 	DryRun bool // print what would be written; write nothing
+	// RewriteCallSites, when true, also rewrites the service's cross_service/*.go
+	// call sites in place: each genqlient.<Op>(ctx, ctx.GraphQL().AsXxx(), …)
+	// swaps its transport for the matching New<Flavor>GraphQLClient(ctx). See
+	// RewriteCallSites (the pure transform) for the exact rules.
+	RewriteCallSites bool
 	// SkipNextSteps suppresses the post-migration instruction block. Set when
 	// the caller is going to chain into another step (e.g. generate) that
 	// makes the printed advice misleading.
@@ -55,9 +60,82 @@ func Run(_ context.Context, dir string, opts Options) error {
 	); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
+	if opts.RewriteCallSites {
+		if err := rewriteCrossServiceCalls(in.abs, opts); err != nil {
+			return fmt.Errorf("migrate: %w", err)
+		}
+	}
 	if !opts.DryRun && !opts.SkipNextSteps {
 		printNextSteps(in.abs)
 	}
+	return nil
+}
+
+// rewriteCrossServiceCalls rewrites every non-test, non-mock, non-generated Go
+// file in the service's cross_service directory in place, swapping gqlclient
+// transports for the defederator compat constructors via the pure
+// RewriteCallSites transform. Files with no matching call site are left
+// untouched; client.go (the generated scaffold) is skipped. This is the I/O
+// shell — the read/write loop — around the pure transform. Honors opts.DryRun.
+func rewriteCrossServiceCalls(abs string, opts Options) error {
+	dir := filepath.Join(abs, "cross_service")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read cross_service dir: %w", err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || skipCrossServiceFile(e.Name()) {
+			continue
+		}
+		if err := rewriteOneCrossServiceFile(filepath.Join(dir, e.Name()), opts); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// skipCrossServiceFile reports whether a cross_service entry should be left
+// untouched by the call-site rewriter: non-Go files, the generated client.go
+// scaffold, tests, and mocks.
+func skipCrossServiceFile(name string) bool {
+	return filepath.Ext(name) != ".go" ||
+		name == "client.go" ||
+		strings.HasSuffix(name, "_test.go") ||
+		strings.HasSuffix(name, "_mocks.go")
+}
+
+// rewriteOneCrossServiceFile applies the pure RewriteCallSites transform to a
+// single file, writing it back in place only when something changed.
+func rewriteOneCrossServiceFile(path string, opts Options) error {
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	out, changed, err := RewriteCallSites(src)
+	if err != nil {
+		return fmt.Errorf("rewrite %s: %w", path, err)
+	}
+	if !changed {
+		return nil
+	}
+	return overwriteFileInPlace(path, out, opts)
+}
+
+// overwriteFileInPlace writes data to an existing path, honoring DryRun. Unlike
+// writeFile it never skips existing files: call-site rewriting modifies files in
+// place by design, so the skip-if-exists guard does not apply.
+func overwriteFileInPlace(path string, data []byte, opts Options) error {
+	if opts.DryRun {
+		_, _ = fmt.Fprintf(os.Stdout, "\n=== %s (rewrite) ===\n%s\n", path, data)
+		return nil
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "migrate: rewrote %s\n", path)
 	return nil
 }
 

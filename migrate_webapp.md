@@ -28,15 +28,19 @@ description below and supersede it where they differ.
 
 ### 1. `defederator migrate` writes only inside the target service directory
 
-For `defederator migrate --force "$WEBAPP/services/<svc>"`, every file written or
-rewritten is under `services/<svc>/`:
+For `defederator migrate --force --rewrite "$WEBAPP/services/<svc>"`, every file
+written or rewritten is under `services/<svc>/`:
 
 - `services/<svc>/.defederator.yml`
-- `services/<svc>/cross_service/client.go` — the adapter, the per-flavor
-  constructors, the op→PlanSpec map, the process-level service-discovery handle,
-  `extractHTTPClient`, and `<svc>SubgraphURLs`
-- `services/<svc>/cross_service/*.go` — the call-site rewrites
-- `services/<svc>/generated/defederator/{client.go,federation_exec.go}`
+- `services/<svc>/cross_service/client.go` — the compat adapter
+  (`defederatorCompatClient`), the per-flavor `New<Flavor>GraphQLClient`
+  constructors, the process-level service-discovery handle (`serviceDiscovery` +
+  `SetServiceDiscovery`), `extractHTTPClient`, the `_subgraphServices` map, and
+  `<svc>SubgraphURLs`
+- `services/<svc>/cross_service/*.go` — the call-site rewrites (only with
+  `--rewrite`)
+- `services/<svc>/generated/defederator/{client.go,federation_exec.go}` — the
+  typed operation structs and the exported `OperationPlanSpecs` op→PlanSpec map
 
 It must **not** touch `pkg/`, other `services/*`, `gengraphql/`, or
 `generated/genqlient/`. The supergraph SDL is read-only input. The single change
@@ -71,11 +75,16 @@ structs are unchanged**, this avoids:
 Three adapter details the template must bake in (each learned the hard way on
 districts):
 
-- **Export an op→PlanSpec map.** The generated `defed` package builds
-  `opName → PlanSpec` only function-locally inside `NewClientWithHTTPFactory`, and
-  `DocumentOperationNames` maps the other direction. Emit a package-level
-  `var operationPlanSpecs = map[string]string{ "<Svc>_<Op>": defed.<Svc><Op>PlanSpec, … }`
-  so the adapter's `MakeRequest` can look a plan up by `req.OpName`.
+- **Export an op→PlanSpec map from the generated package.** The generated `defed`
+  package historically built `opName → PlanSpec` only function-locally inside
+  `NewClientWithHTTPFactory`, and `DocumentOperationNames` mapped the other
+  direction — neither reachable by name from the adapter. The generator now emits a
+  package-level `var OperationPlanSpecs = map[string]string{ "<Svc>_<Op>":
+  <Svc><Op>PlanSpec, … }` in `generated/defederator/client.go`, so the adapter's
+  `MakeRequest` looks a plan up with `defed.OperationPlanSpecs[req.OpName]`. (It is
+  exported and lives in the lint-excluded `generated/` tree, so `ka-visibility`
+  does not apply — contrast the hand-maintained `_subgraphServices` map in
+  `client.go`, which is single-file-private and may keep its underscore.)
 - **Normalize `req.Variables`.** genqlient passes a typed struct, but the planner's
   `filterVars` only subsets a `map[string]any` — a struct is sent whole to every
   subgraph fetch. JSON round-trip it into a map first.
@@ -136,10 +145,14 @@ Lint-clean under webapp's custom linters when the template observes:
   (`errors.Wrap`/`errors.Internal`), never `fmt.Errorf` or stdlib `errors`; no
   `time.Now`, no `sync.WaitGroup` (`ka-banned-symbol`/`depguard`).
 - **`ka-visibility`** — no leading-underscore identifier referenced from another
-  file in the package. The op→PlanSpec map, the service-discovery handle, and any
-  context-interface helper must be plain lowercase (`operationPlanSpecs`, not
-  `_operationPlanSpecs`). This is the same rule as addendum 3c/7 — emit no
-  `_`-prefixed cross-file names.
+  file in the package. The service-discovery handle (`serviceDiscovery`), the
+  per-flavor constructors, and any context-interface helper must be plain
+  lowercase or exported — no `_`-prefixed names used across files. This is the same
+  rule as addendum 3c/7. (The `_subgraphServices` map keeps its underscore only
+  because it is referenced solely within `client.go`; a leading underscore is a
+  lint failure the moment another file in the package references the identifier.
+  The op→PlanSpec map is exported as `defed.OperationPlanSpecs` in the lint-excluded
+  `generated/` tree, so it is outside this rule entirely.)
 - **`ka-context-interface` (ADR-429)** — with B2 there is **no** new
   `service_discovery` requirement, so the migration introduces no new violations
   and no cascade. (Any debt a recompile surfaces in callers is pre-existing, not
@@ -159,10 +172,11 @@ a cache-cleared `tools/runlint.sh services/<svc>/cross_service/*.go`, and
 For each service directory it:
 
 1. Reads `genqlient.yaml` and derives `.defederator.yml` (schema path, client output path, scalar bindings, INPUT_OBJECT bindings for types owned by this service).
-2. Reads the supergraph SDL and generates `cross_service/client.go` with a `newFederationClient` constructor and an `exampleSubgraphURLs` helper wired to service discovery.
-3. By default, chains into the `defederator` generate step using the just-written `.defederator.yml`: writes `generated/defederator/client.go` (typed operation structs + enum types) and `generated/defederator/federation_exec.go` (self-contained execution engine). Pass `--no-generate` to skip this step and run `defederator` manually later.
+2. Reads the supergraph SDL and generates `cross_service/client.go` with the compat adapter (`newCompatClient` / `defederatorCompatClient`), one `New<Flavor>GraphQLClient` constructor per detected auth flavor, and the `SetServiceDiscovery` handle (§3).
+3. By default, chains into the `defederator` generate step using the just-written `.defederator.yml`: writes `generated/defederator/client.go` (typed operation structs + enum types + the `OperationPlanSpecs` map) and `generated/defederator/federation_exec.go` (self-contained execution engine). Pass `--no-generate` to skip this step and run `defederator` manually later.
+4. With `--rewrite`, rewrites the `cross_service/*.go` call sites in place to use the `New<Flavor>GraphQLClient` constructors (see "Reaching the Design-constraints end state").
 
-Steps 1–2 are written only if they do not exist, unless `--force` is passed. Step 3, when enabled, always runs and overwrites the generated client.
+Steps 1–2 are written only if they do not exist, unless `--force` is passed. Step 3, when enabled, always runs and overwrites the generated client. Step 4 runs only with `--rewrite` and edits existing call-site files in place (honoring `--dry-run`).
 
 ## What migrate handles automatically
 
@@ -174,12 +188,13 @@ cross-service Go files. Specifically:
   actually query, determined by running the federation query planner against
   every operation and collecting the unique set of touched subgraphs. The own
   service is always kept regardless of self-references.
-- **Auth factory shape matches the service's call patterns.** Migrate scans the
+- **Auth constructors match the service's call patterns.** Migrate scans the
   cross_service `.go` files for `ctx.GraphQL().AsUser()`,
   `.AsServiceAdmin()`, and `WithKALocale(...).AsUser()` chains and emits one
-  factory per detected flavor, all funneling through a shared
-  `newJobFederationClient`. Services with a single auth flavor get the simpler
-  `newFederationClient(ctx _federationCtx)` form.
+  `New<Flavor>GraphQLClient(ctx) graphql.Client` constructor per detected flavor
+  (`NewUserGraphQLClient`, `NewAdminGraphQLClient`, `NewLocaleUserGraphQLClient`),
+  each funneling through the shared compat adapter (`newCompatClient` /
+  `defederatorCompatClient`, §2).
 - **INPUT_OBJECT bindings are pruned** to the intersection of (a) types this
   service owns in the supergraph and (b) types that appear as variable types
   in at least one operation. No noisy bindings for types nothing references.
@@ -195,25 +210,31 @@ cross-service Go files. Specifically:
 You should still review the generated files before committing, but no manual
 edits are required for the cases above.
 
-### Not yet automated (gap vs. the Design constraints)
+### Reaching the Design-constraints end state
 
-Today `migrate` generates the config + scaffold + typed client; reaching the
-Design-constraints end state (compat adapter, no cascade, package-local) still
-needs these steps, which the tool should grow to perform (all confined to
-`services/<svc>/`):
+`migrate` now produces the full Design-constraints output — compat adapter, no
+`ctx` cascade, package-local — entirely inside `services/<svc>/`:
 
-1. **Emit the compat adapter + `operationPlanSpecs` map** in `cross_service/client.go`
-   (§2) instead of, or alongside, the typed `newFederationClient` — and a
-   `New<Flavor>GraphQLClient` returning `graphql.Client` per detected flavor.
-2. **Rewrite the call sites** — swap `ctx.GraphQL()[.WithService(…)].As<Flavor>()`
-   for `New<Flavor>GraphQLClient(ctx)`, drop `WithService`, leave task-dispatch
-   calls alone. (migrate already parses these files for flavor detection, so it
-   has the AST it needs.)
-3. **Emit the B2 handle** — `var serviceDiscovery` + `SetServiceDiscovery` (§3);
-   the human adds the one `SetServiceDiscovery(sd)` call in `cmd/serve`.
+1. **Compat adapter + `OperationPlanSpecs` map** are emitted in
+   `cross_service/client.go` (§2): `newCompatClient` / `defederatorCompatClient`
+   resolve each operation by name against the generated
+   `defed.OperationPlanSpecs` map, and one `New<Flavor>GraphQLClient(ctx)
+   graphql.Client` constructor is emitted per detected flavor.
+2. **Call sites are rewritten** by the `--rewrite` flag: each
+   `ctx.GraphQL()[.WithService(…)].As<Flavor>()` becomes
+   `New<Flavor>GraphQLClient(ctx)` in place, `WithService` is dropped, and
+   task-dispatch calls are left alone. Run `defederator migrate --rewrite
+   services/<svc>` (or preview with `--dry-run --rewrite`). The transform only
+   touches `cross_service/*.go`, skipping `client.go`, `*_test.go`, and
+   `*_mocks.go`.
+3. **B2 handle** — `var serviceDiscovery` + `SetServiceDiscovery` (§3) — is
+   emitted in `cross_service/client.go`.
 
-Until then those three are the manual follow-up after `defederator migrate`; the
-districts reference implementation shows the target output.
+The one remaining human step is wiring the handle: add a single
+`cross_service.SetServiceDiscovery(sd)` call in the service's `cmd/serve`
+startup. The tool deliberately does not edit `cmd/serve` — the call belongs once
+at process start, where the human already constructs `sd`. The districts
+reference implementation shows the full target output.
 
 ## defederator code generation (only with `--no-generate`)
 
@@ -230,11 +251,34 @@ This reads `.defederator.yml`, strips federation metadata from the supergraph SD
 
 ## Per-service migration commands
 
-Run from the repo root or use absolute paths. `--dry-run` prints what would be written without touching the filesystem.
+Run from the repo root or use absolute paths.
 
 ```sh
 WEBAPP=~/khan/webapp
 ```
+
+The per-service commands below show the **minimal** invocation, which writes
+`.defederator.yml` + `cross_service/client.go` and chains generation — but leaves
+the call sites alone. To reach the full Design-constraints end state in one pass,
+add `--rewrite` so migrate also rewrites the `cross_service/*.go` call sites
+(§"Reaching the Design-constraints end state"):
+
+```sh
+defederator migrate --force --rewrite "$WEBAPP/services/<svc>"
+```
+
+Useful flags:
+
+- `--rewrite` — also rewrite `cross_service/*.go` call sites to the
+  `New<Flavor>GraphQLClient` constructors (skips `client.go`, `*_test.go`,
+  `*_mocks.go`).
+- `--dry-run` — print what would be written (including rewrites) without touching
+  the filesystem. Combine with `--rewrite` to preview the call-site diff.
+- `--force` — overwrite an existing `.defederator.yml` / `cross_service/client.go`.
+- `--no-generate` — write only the config + scaffold; skip the chained generate.
+
+After `--rewrite`, the one remaining manual step is adding a single
+`cross_service.SetServiceDiscovery(sd)` call in the service's `cmd/serve` startup.
 
 ### admin
 
@@ -245,26 +289,16 @@ defederator migrate "$WEBAPP/services/admin"
 ### ai-guide
 
 ```sh
-defederator migrate "$WEBAPP/services/ai-guide"
+defederator migrate --force --rewrite "$WEBAPP/services/ai-guide"
 ```
 
-Post-migration: ai-guide has user, admin, and locale-user auth contexts. Replace the generated `newFederationClient` with the three-constructor pattern from `9805d36dc51b386531660f98c28d48982ccbe737`:
-
-```go
-func NewUserFederationClient(ctx _userCtx) defed.FederationClient { ... }
-func NewAdminFederationClient(ctx _adminCtx) defed.FederationClient { ... }
-func newLocaleUserFederationClient(ctx _localeCtx) defed.FederationClient { ... }
-func newJobFederationClient(httpClient *http.Client, sd service_discovery.Client) defed.FederationClient { ... }
-```
-
-> **Superseded by the Design constraints.** This historical snippet uses the typed
-> `defed.FederationClient` route (the response-object-type cascade, §2) and
-> `_`-prefixed context types (which `ka-visibility` rejects across files —
-> addendum 3c/7). Prefer the compat constructors returning `graphql.Client` and
-> taking only `gqlclient.KAContext` (`NewUserGraphQLClient` /
-> `NewAdminGraphQLClient` / a locale variant), with service discovery sourced
-> in-process (§3). Keep one constructor per detected auth flavor; no underscore
-> names.
+ai-guide has user, admin, **and** locale-user auth contexts, so migrate emits all
+three constructors — `NewUserGraphQLClient`, `NewAdminGraphQLClient`, and
+`NewLocaleUserGraphQLClient(ctx, kaLocale)` — automatically. No manual
+constructor editing is needed. Note ai-guide also dispatches tasks via
+`tasks.GraphQLTask(...)`; `--rewrite` leaves those sites untouched, but watch for
+the `ka-graphql-task` requirement (addendum §4b) and the orphaned-annotation class
+(§9) — run `defederator check` after migrating.
 
 ### assessments
 
@@ -329,14 +363,15 @@ defederator migrate "$WEBAPP/services/discussions"
 ### districts
 
 ```sh
-defederator migrate "$WEBAPP/services/districts"
+defederator migrate --force --rewrite "$WEBAPP/services/districts"
 ```
 
 Districts is the **reference implementation** of the Design-constraints approach
-(compat adapter + B2 service discovery). All 24 in-scope `cross_service` files were
-migrated by swapping the `graphql.Client` (`New{Admin,User}GraphQLClient`),
-keeping every genqlient function/response type; task-dispatch wrappers
-(`districts.go`, `recompute_roles.go`) were left untouched. Build, `go test
+(compat adapter + B2 service discovery) — and the worked example the `--rewrite`
+automation was distilled from. All 24 in-scope `cross_service` files were migrated
+by swapping the `graphql.Client` (`New{Admin,User}GraphQLClient`), keeping every
+genqlient function/response type; task-dispatch wrappers (`districts.go`,
+`recompute_roles.go`) were left untouched. Build, `go test
 ./services/districts/...`, and `ka-context-interface` lint are all green, and —
 because service discovery comes from the in-process handle (§3) — no caller
 outside `cross_service/` changed. Use it as the template for the next service.
@@ -455,7 +490,8 @@ defederator migrate "$WEBAPP/services/zendesk"
 
 ## Batch migration
 
-To migrate all services at once (inspect output before committing):
+To preview all services at once before committing, run the loop with `--dry-run`
+(combined with `--rewrite` to also preview the call-site diffs):
 
 ```sh
 export WEBAPP=~/khan/webapp
@@ -467,11 +503,17 @@ for svc in \
   mcp-gateway notifications programs progress-reports progress \
   recommendations rest-gateway rewards search users zendesk; do
     echo "=== $svc ==="
-    defederator migrate --force "$WEBAPP/services/$svc"
+    defederator migrate --force --rewrite --dry-run "$WEBAPP/services/$svc"
 done
 ```
 
-Remove `--dry-run` once you are satisfied with the output. Pass `--force` to overwrite existing files. Pass `--no-generate` in the batch loop if you want to review every `.defederator.yml` before any client is generated; otherwise each iteration also writes `generated/defederator/client.go` for that service.
+Drop `--dry-run` to actually write. Drop `--rewrite` if you want to land the
+config + generated client first and rewrite call sites in a later pass. Add
+`--no-generate` if you want to review every `.defederator.yml` before any client
+is generated; otherwise each iteration also writes `generated/defederator/client.go`
+for that service. Migrate one service end-to-end and verify it (build, test, lint)
+before fanning out — and remember the one manual `SetServiceDiscovery(sd)` wiring
+in each service's `cmd/serve`.
 
 ---
 
@@ -511,9 +553,9 @@ Exit code `0` means clean. Non-zero exit prints each orphan as `<file>:<line>: g
 Run it as part of the standard post-migration loop:
 
 ```sh
-defederator migrate --force services/<name>
+defederator migrate --force --rewrite services/<name>
 defederator check services/<name> || exit 1
-# … then commit
+# … then add SetServiceDiscovery(sd) in cmd/serve, build, test, then commit
 ```
 
 `defederator check` also catches the inverse class — when a follow-up commit removes an annotation block as part of "cleanup" but the call site survives. Wiring `check` into pre-commit or CI makes that class of regression fail loudly instead of silently.
@@ -613,7 +655,7 @@ Defederator generates `Get<FragmentName>()` conversion getters that reconstruct 
 > ```go
 > client := newFederationClient(ctx)   // undefined in multi-flavor template
 > ```
-> Fix: always emit `federationCtx` + `newFederationClient`; Multi flavors get the per-flavor constructors *in addition*.
+> Fix (at the time): always emit `federationCtx` + `newFederationClient`; Multi flavors get the per-flavor constructors *in addition*. **Later superseded:** the template was redesigned around the compat adapter (Design constraints §2), which emits only `New<Flavor>GraphQLClient(ctx) graphql.Client` per flavor and no `federationCtx`/`newFederationClient` at all. This entry is retained as history.
 
 **3c. Underscore-prefixed type names trigger `ka-visibility`.** Webapp treats leading-underscore identifiers as file-private (enforced by `dev/linters/visibility_lint.go`). The migrate template's `_federationCtx` / `_jobsCtx` could only be referenced from `client.go`, so every cross-service file that took one as a parameter failed lint.
 

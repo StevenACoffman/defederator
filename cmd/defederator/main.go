@@ -165,7 +165,7 @@ func generateAt(
 func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("migrate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	var force, dryRun, noGenerate, verbose bool
+	var force, dryRun, noGenerate, rewrite, verbose bool
 	fs.BoolVar(
 		&force,
 		"force",
@@ -179,6 +179,12 @@ func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		false,
 		"only write .defederator.yml and cross_service/client.go; skip the generate step",
 	)
+	fs.BoolVar(
+		&rewrite,
+		"rewrite",
+		false,
+		"also rewrite cross_service/*.go call sites to the New<Flavor>GraphQLClient constructors",
+	)
 	fs.BoolVar(&verbose, "verbose", false, "print per-file and per-operation progress on stderr")
 	fs.BoolVar(&verbose, "v", false, "shorthand for --verbose")
 	if err := fs.Parse(args); err != nil {
@@ -186,15 +192,16 @@ func runMigrate(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 	if fs.NArg() != 1 {
 		return errors.New(
-			"migrate requires exactly one argument: <service-dir>\nusage: defederator migrate [--force] [--dry-run] [--no-generate] [-v] <service-dir>",
+			"migrate requires exactly one argument: <service-dir>\nusage: defederator migrate [--force] [--dry-run] [--no-generate] [--rewrite] [-v] <service-dir>",
 		)
 	}
 	dir := fs.Arg(0)
 	chainGenerate := !dryRun && !noGenerate
 	if err := migrate.Run(ctx, dir, migrate.Options{
-		Force:         force,
-		DryRun:        dryRun,
-		SkipNextSteps: chainGenerate, // suppress "Run: defederator --dir" message
+		Force:            force,
+		DryRun:           dryRun,
+		RewriteCallSites: rewrite,
+		SkipNextSteps:    chainGenerate, // suppress "Run: defederator --dir" message
 	}); err != nil {
 		return fmt.Errorf("defederator: migrate: %w", err)
 	}
@@ -265,6 +272,7 @@ migrate flags:
   --force        overwrite existing .defederator.yml and cross_service/client.go
   --dry-run      print what would be written without writing files
   --no-generate  skip the chained 'defederator generate' step
+  --rewrite      rewrite cross_service/*.go call sites to the New<Flavor>GraphQLClient constructors
   --verbose, -v  print per-file and per-operation progress on stderr
 
 check exits non-zero when one or more orphaned genqlient calls are found
